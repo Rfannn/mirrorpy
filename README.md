@@ -132,6 +132,37 @@ Tests cover:
 - Config save/load
 - Thread safety
 
+## 🔄 CI/CD
+
+MirrorPy uses GitHub Actions for continuous integration and automated releases:
+
+### CI Pipeline
+- **Linting**: flake8 for code quality
+- **Security**: bandit for vulnerability scanning
+- **Testing**: Unit tests on Windows and Linux
+- **Python versions**: 3.9, 3.10, 3.11, 3.12
+
+### Releases
+- **Trigger**: Push a tag (e.g., `v2.1.0`)
+- **Builds**: Windows `.exe` and Linux `.AppImage`
+- **Release notes**: Auto-generated from commits
+- **Artifacts**: Uploaded to GitHub Releases
+
+### Creating a Release
+
+```bash
+# Tag the release
+git tag v2.1.0
+
+# Push the tag to trigger the release workflow
+git push origin v2.1.0
+```
+
+The release workflow will:
+1. Build executables for Windows and Linux
+2. Create a GitHub Release with auto-generated notes
+3. Upload the executables as release assets
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
@@ -153,6 +184,8 @@ python -m unittest test_mirror -v
 - Keep commits atomic and well-described
 
 ## 📋 Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a detailed history of changes.
 
 ### v2.0.0 (Latest)
 - ⚡ **Quick Mirror** — one-click detect → connect → mirror

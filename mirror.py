@@ -1,28 +1,30 @@
 """
-Wireless scrcpy Launcher (Tkinter + ttkbootstrap)
-- No netifaces dependency (uses socket + ping sweep)
-- Features: auto detect IP, network scan, adb devices listing,
-  Pair / Connect / Disconnect / Start scrcpy, settings saved, logging.
-Author: adapted for Rfannn
+MirrorPy — Wireless scrcpy Launcher
+Features: adb mDNS device discovery, QR code pairing, modern ttkbootstrap GUI.
 """
 
+import io
 import os
+import re
 import sys
-import time
 import socket
 import platform
 import subprocess
 import configparser
 import logging
+import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue, Empty
-import threading
 
-# UI:
+# UI
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from ttkbootstrap.dialogs import Messagebox
+
+# QR code
+import qrcode
+from PIL import ImageTk, Image
 
 # ---------- Config & Logging ----------
 CONFIG_FILE = "settings.ini"
@@ -34,10 +36,10 @@ DEFAULTS = {
     "PairCode": "",
     "Theme": "darkly",
     "ScanThreads": "100",
-    "PingTimeoutSec": "1"
+    "PingTimeoutSec": "1",
+    "LastDevice": "",
 }
 
-# Setup file logger
 logger = logging.getLogger("scrcpy_launcher")
 logger.setLevel(logging.DEBUG)
 fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
@@ -45,34 +47,28 @@ fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger.addHandler(fh)
 
 
-# ---------- Helpers ----------
+# ============================================================
+#  Helpers — pure functions, no tkinter dependency
+# ============================================================
+
 def get_local_ip():
-    """
-    Return a sensible local IP address for the default route (e.g. 192.168.x.x)
-    Does not require netifaces; uses UDP socket trick.
-    """
+    """Return this machine's LAN IP via the UDP socket trick."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        # IP doesn't have to be reachable; 8.8.8.8 used to determine interface
         s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
+        return s.getsockname()[0]
     except Exception:
-        ip = None
+        return None
     finally:
         s.close()
-    return ip
 
 
 def ping_host(ip, timeout=1):
-    """
-    Ping an IP once; return True if host responds.
-    Cross-platform wrapper around ping command.
-    """
+    """Ping an IP once; return True if it responds."""
     system = platform.system().lower()
     if system == "windows":
         cmd = ["ping", "-n", "1", "-w", str(int(timeout * 1000)), ip]
     else:
-        # -c 1 (count), -W timeout in seconds (Linux). BSD/Mac uses -W in ms? Variation exists.
         cmd = ["ping", "-c", "1", "-W", str(int(timeout)), ip]
     try:
         result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -82,16 +78,13 @@ def ping_host(ip, timeout=1):
 
 
 def run_cmd(args, input_text=None, timeout=None):
-    """
-    Run a command and return (stdout, stderr, returncode).
-    Accepts args as list or string. Allows sending input_text to process stdin.
-    """
+    """Run a command; return (stdout, stderr, returncode)."""
     try:
-        if isinstance(args, str):
-            shell = True
-        else:
-            shell = False
-        proc = subprocess.run(args, input=input_text, capture_output=True, text=True, shell=shell, timeout=timeout)
+        shell = isinstance(args, str)
+        proc = subprocess.run(
+            args, input=input_text, capture_output=True, text=True,
+            shell=shell, timeout=timeout,
+        )
         return proc.stdout.strip(), proc.stderr.strip(), proc.returncode
     except subprocess.TimeoutExpired:
         return "", "timeout", -1
@@ -100,28 +93,168 @@ def run_cmd(args, input_text=None, timeout=None):
 
 
 def adb_devices_list():
-    """
-    Return parsed adb devices list as list of dicts:
-    [{ "serial": "...", "state": "...", "info": "..." }, ...]
-    """
+    """Return parsed ``adb devices -l`` output as a list of dicts."""
     out, err, rc = run_cmd(["adb", "devices", "-l"])
     if rc != 0:
         return []
-    lines = out.splitlines()
     devices = []
-    for line in lines[1:]:  # skip header
+    for line in out.splitlines()[1:]:
         line = line.strip()
-        if not line:
+        if not line or line.startswith("*"):
             continue
         parts = line.split()
+        if len(parts) < 2:
+            continue
         serial = parts[0]
-        state = parts[1] if len(parts) > 1 else ""
+        state = parts[1]
         info = " ".join(parts[2:]) if len(parts) > 2 else ""
         devices.append({"serial": serial, "state": state, "info": info, "raw": line})
     return devices
 
 
-# ---------- GUI App ----------
+def parse_device_model(info_str):
+    """Extract model from adb info string like 'product:m32dd model:SM_M325F'."""
+    m = re.search(r"model:(\S+)", info_str)
+    return m.group(1).replace("_", " ") if m else ""
+
+
+def parse_device_product(info_str):
+    m = re.search(r"product:(\S+)", info_str)
+    return m.group(1) if m else ""
+
+
+# ---------- mDNS helpers ----------
+
+def adb_mdns_init():
+    """Start the adb mDNS daemon if it isn't already running. Returns True on success."""
+    out, err, rc = run_cmd(["adb", "mdns", "check"], timeout=5)
+    if rc == 0 and "mdns daemon version" in (out + err).lower():
+        return True
+    # try to start it
+    out, err, rc = run_cmd(["adb", "mdns", "check"], timeout=5)
+    return rc == 0
+
+
+def adb_mdns_discover():
+    """
+    Discover Android devices via adb mDNS.
+    Returns list of dicts: [{ name, type, host, ip, port }, ...]
+    """
+    # Ensure mDNS daemon is running
+    adb_mdns_init()
+
+    out, err, rc = run_cmd(["adb", "mdns", "services"], timeout=8)
+    if rc != 0:
+        return []
+
+    services = []
+    for line in out.splitlines():
+        line = line.strip()
+        # skip header and empty lines
+        if not line or line.lower().startswith("list of") or line.lower().startswith("error"):
+            continue
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        svc_name = parts[0]
+        svc_type = parts[1]
+        host_port = parts[2]
+        # parse ip:port
+        if ":" in host_port:
+            ip, port = host_port.rsplit(":", 1)
+        else:
+            ip, port = host_port, ""
+        services.append({
+            "name": svc_name,
+            "type": svc_type,
+            "host": host_port,
+            "ip": ip,
+            "port": port,
+        })
+    return services
+
+
+def full_discover():
+    """
+    Combined discovery: adb devices + mDNS.
+    Returns list of device dicts with keys:
+      serial, state, model, product, ip, port, source
+    """
+    results = []
+    seen = set()
+
+    # 1) Already-connected devices from adb devices -l
+    for dev in adb_devices_list():
+        model = parse_device_model(dev["info"])
+        product = parse_device_product(dev["info"])
+        ip, port = "", ""
+
+        # Try to extract ip:port from serial (e.g. "192.168.1.4:33407")
+        if ":" in dev["serial"] and not dev["serial"].startswith("adb-"):
+            ip, port = dev["serial"].rsplit(":", 1)
+
+        entry = {
+            "serial": dev["serial"],
+            "state": dev["state"],
+            "model": model or product or dev["serial"],
+            "product": product,
+            "ip": ip,
+            "port": port,
+            "info": dev["info"],
+            "source": "adb",
+        }
+        key = dev["serial"]
+        if key not in seen:
+            results.append(entry)
+            seen.add(key)
+
+    # 2) mDNS-discovered devices (wireless debugging)
+    for svc in adb_mdns_discover():
+        # Check if this IP is already in results
+        already = any(r["ip"] == svc["ip"] for r in results)
+        if already:
+            # Update port if missing
+            for r in results:
+                if r["ip"] == svc["ip"] and not r["port"]:
+                    r["port"] = svc["port"]
+            continue
+
+        entry = {
+            "serial": f"{svc['ip']}:{svc['port']}",
+            "state": "mdns",
+            "model": svc["name"],
+            "product": "",
+            "ip": svc["ip"],
+            "port": svc["port"],
+            "info": svc["type"],
+            "source": "mdns",
+        }
+        results.append(entry)
+
+    return results
+
+
+# ============================================================
+#  GUI helpers
+# ============================================================
+
+def generate_qr_pil(text, box_size=6, border=2):
+    """Generate a QR code and return a PIL Image."""
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=box_size,
+        border=border,
+    )
+    qr.add_data(text)
+    qr.make(fit=True)
+    return qr.make_image(fill_color="black", back_color="white").convert("RGB")
+
+
+# ============================================================
+#  GUI Logger widget
+# ============================================================
+
 class GuiLogger(ttk.Frame):
     def __init__(self, master, height=10, **kwargs):
         super().__init__(master, **kwargs)
@@ -150,240 +283,472 @@ class GuiLogger(ttk.Frame):
         self.text.config(state="disabled")
 
     def log(self, message, level="info"):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        formatted = f"[{timestamp}] {message}"
-        self.queue.put((formatted, self._level_to_color(level)))
-        # also file log
-        if level == "debug":
-            logger.debug(message)
-        elif level == "warning":
-            logger.warning(message)
-        elif level == "error":
-            logger.error(message)
-        else:
-            logger.info(message)
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.queue.put((f"[{ts}] {message}", self._color(level)))
+        log_fn = {"debug": logger.debug, "warning": logger.warning,
+                  "error": logger.error}.get(level, logger.info)
+        log_fn(message)
 
     @staticmethod
-    def _level_to_color(level):
-        mapping = {"info": "black", "success": "green", "error": "red", "warning": "orange", "debug": "gray", "blue": "blue"}
-        return mapping.get(level, "black")
+    def _color(level):
+        return {"info": "black", "success": "#2ecc71", "error": "#e74c3c",
+                "warning": "#f39c12", "debug": "#95a5a6", "blue": "#3498db"
+                }.get(level, "black")
 
+
+# ============================================================
+#  Device Card — compact info panel for the detected device
+# ============================================================
+
+class DeviceCard(ttk.Labelframe):
+    """Displays the currently detected / connected device."""
+
+    def __init__(self, master, **kwargs):
+        super().__init__(master, text="  📱  Device  ", padding=12, **kwargs)
+
+        self._model_var = ttk.StringVar(value="No device detected")
+        self._ip_var = ttk.StringVar(value="")
+        self._status_var = ttk.StringVar(value="idle")
+        self._serial_var = ttk.StringVar(value="")
+
+        # Model / name
+        ttk.Label(self, textvariable=self._model_var,
+                  font=("Segoe UI", 13, "bold")).pack(anchor=W)
+        # IP line
+        ttk.Label(self, textvariable=self._ip_var,
+                  font=("Consolas", 10)).pack(anchor=W, pady=(2, 0))
+        # Status badge
+        self._status_label = ttk.Label(self, textvariable=self._status_var,
+                                       font=("Segoe UI", 9, "bold"))
+        self._status_label.pack(anchor=W, pady=(4, 0))
+
+    def set_device(self, model, ip, port, serial, status="ready"):
+        self._model_var.set(model or "Unknown device")
+        self._ip_var.set(f"{ip}:{port}" if port else ip)
+        self._serial_var.set(serial)
+        color = {"ready": "#2ecc71", "connected": "#27ae60",
+                 "mirroring": "#e67e22", "idle": "#95a5a6",
+                 "error": "#e74c3c"}.get(status, "#95a5a6")
+        self._status_label.config(foreground=color)
+        self._status_var.set(f"● {status.upper()}")
+
+    def clear(self):
+        self._model_var.set("No device detected")
+        self._ip_var.set("")
+        self._status_var.set("idle")
+        self._serial_var.set("")
+        self._status_label.config(foreground="#95a5a6")
+
+    @property
+    def serial(self):
+        return self._serial_var.get()
+
+
+# ============================================================
+#  Main Application
+# ============================================================
 
 class ScrcpyLauncher(ttk.Window):
     def __init__(self):
-        themename = DEFAULTS.get("Theme", "darkly")
-        super().__init__(themename=themename)
-        self.title("Wireless scrcpy Launcher — Modern")
-        self.geometry("760x560")
-        self.minsize(720, 520)
-
-        self.config_parser = configparser.ConfigParser()
+        self._cfg = configparser.ConfigParser()
         self._load_config()
+        theme = self._cfg["DEFAULT"].get("Theme", "darkly")
+        super().__init__(themename=theme)
+        self.title("MirrorPy — scrcpy Launcher")
+        self.geometry("900x720")
+        self.minsize(800, 640)
 
-        # UI variables
-        self.ip_var = ttk.StringVar(value=self.config_parser["DEFAULT"].get("IP", ""))
-        self.pair_port_var = ttk.StringVar(value=self.config_parser["DEFAULT"].get("PairPort", DEFAULTS["PairPort"]))
-        self.connect_port_var = ttk.StringVar(value=self.config_parser["DEFAULT"].get("ConnectPort", DEFAULTS["ConnectPort"]))
-        self.pair_code_var = ttk.StringVar(value=self.config_parser["DEFAULT"].get("PairCode", ""))
-        self.theme_var = ttk.StringVar(value=self.config_parser["DEFAULT"].get("Theme", DEFAULTS["Theme"]))
-        self.scan_threads = int(self.config_parser["DEFAULT"].get("ScanThreads", DEFAULTS["ScanThreads"]))
-        self.ping_timeout = float(self.config_parser["DEFAULT"].get("PingTimeoutSec", DEFAULTS["PingTimeoutSec"]))
+        # Variables
+        self.ip_var = ttk.StringVar(value=self._cfg["DEFAULT"].get("IP", ""))
+        self.pair_port_var = ttk.StringVar(value=self._cfg["DEFAULT"].get("PairPort", "5555"))
+        self.connect_port_var = ttk.StringVar(value=self._cfg["DEFAULT"].get("ConnectPort", "5555"))
+        self.pair_code_var = ttk.StringVar(value=self._cfg["DEFAULT"].get("PairCode", ""))
+        self.theme_var = ttk.StringVar(value=theme)
+        self.scan_threads = int(self._cfg["DEFAULT"].get("ScanThreads", "100"))
+        self.ping_timeout = float(self._cfg["DEFAULT"].get("PingTimeoutSec", "1"))
 
-        self._create_widgets()
-        self.logger.log("App ready. Click 'Auto-detect' or 'Scan network' to find your phone.", "info")
+        self._qr_photo = None  # keep reference to avoid GC
+
+        self._build_ui()
+        self._refresh_devices()
+        self.logger.log("Ready.  Click **Detect Device** to find your phone.", "info")
+
+    # ---------- Config persistence ----------
 
     def _load_config(self):
         if os.path.exists(CONFIG_FILE):
-            self.config_parser.read(CONFIG_FILE)
-            # ensure defaults exist
-            for k, v in DEFAULTS.items():
-                if k not in self.config_parser["DEFAULT"]:
-                    self.config_parser["DEFAULT"][k] = v
+            self._cfg.read(CONFIG_FILE)
         else:
-            self.config_parser["DEFAULT"] = DEFAULTS.copy()
+            self._cfg["DEFAULT"] = DEFAULTS.copy()
             with open(CONFIG_FILE, "w") as f:
-                self.config_parser.write(f)
+                self._cfg.write(f)
+        for k, v in DEFAULTS.items():
+            if k not in self._cfg["DEFAULT"]:
+                self._cfg["DEFAULT"][k] = v
 
     def _save_config(self):
-        # sync variables into config and save
-        self.config_parser["DEFAULT"]["IP"] = self.ip_var.get().strip()
-        self.config_parser["DEFAULT"]["PairPort"] = self.pair_port_var.get().strip()
-        self.config_parser["DEFAULT"]["ConnectPort"] = self.connect_port_var.get().strip()
-        self.config_parser["DEFAULT"]["PairCode"] = self.pair_code_var.get().strip()
-        self.config_parser["DEFAULT"]["Theme"] = self.theme_var.get().strip()
-        self.config_parser["DEFAULT"]["ScanThreads"] = str(self.scan_threads)
-        self.config_parser["DEFAULT"]["PingTimeoutSec"] = str(self.ping_timeout)
+        self._cfg["DEFAULT"]["IP"] = self.ip_var.get().strip()
+        self._cfg["DEFAULT"]["PairPort"] = self.pair_port_var.get().strip()
+        self._cfg["DEFAULT"]["ConnectPort"] = self.connect_port_var.get().strip()
+        self._cfg["DEFAULT"]["PairCode"] = self.pair_code_var.get().strip()
+        self._cfg["DEFAULT"]["Theme"] = self.theme_var.get().strip()
+        self._cfg["DEFAULT"]["ScanThreads"] = str(self.scan_threads)
+        self._cfg["DEFAULT"]["PingTimeoutSec"] = str(self.ping_timeout)
         with open(CONFIG_FILE, "w") as f:
-            self.config_parser.write(f)
+            self._cfg.write(f)
 
-    def _create_widgets(self):
-        # Top area: header + small ascii logo
-        header = ttk.Frame(self, padding=(12, 12, 12, 6))
-        header.pack(fill=X)
+    # ---------- Thread-safe scheduling ----------
 
-        logo_label = ttk.Label(header, text="📱  Wireless scrcpy Launcher", font=("Segoe UI", 16, "bold"))
-        logo_label.pack(side=LEFT)
+    def _schedule(self, cb, *a):
+        self.after(0, cb, *a)
 
-        theme_combo = ttk.Combobox(header, values=ttk.Style().theme_names(), textvariable=self.theme_var, width=16, state="readonly")
-        theme_combo.pack(side=RIGHT)
-        theme_combo.bind("<<ComboboxSelected>>", self._on_theme_change)
+    # ==========================================================
+    #  UI Construction
+    # ==========================================================
 
-        # Main left and right frames
-        main = ttk.Frame(self, padding=10)
-        main.pack(fill=BOTH, expand=YES)
+    def _build_ui(self):
+        # ── Top bar ──────────────────────────────────────────
+        topbar = ttk.Frame(self, padding=(14, 10, 14, 4))
+        topbar.pack(fill=X)
+        ttk.Label(topbar, text="📱  MirrorPy",
+                  font=("Segoe UI", 18, "bold")).pack(side=LEFT)
+        ttk.Label(topbar, text="  scrcpy wireless launcher",
+                  font=("Segoe UI", 10), foreground="gray").pack(side=LEFT, padx=(0, 20))
 
-        left = ttk.Frame(main)
-        left.pack(side=LEFT, fill=BOTH, expand=YES, padx=(0, 8))
+        ttk.Label(topbar, text="Theme:").pack(side=RIGHT, padx=(0, 4))
+        ttk.Combobox(topbar, values=ttk.Style().theme_names(),
+                     textvariable=self.theme_var, width=14,
+                     state="readonly").pack(side=RIGHT)
+        self.theme_var.trace_add("write", lambda *_: self._on_theme_change())
 
-        right = ttk.Frame(main, width=260)
+        # ── Separator ────────────────────────────────────────
+        ttk.Separator(self, orient=HORIZONTAL).pack(fill=X, padx=10, pady=4)
+
+        # ── Main content: left (controls) | right (QR + settings)
+        body = ttk.Frame(self, padding=10)
+        body.pack(fill=BOTH, expand=YES)
+
+        left = ttk.Frame(body)
+        left.pack(side=LEFT, fill=BOTH, expand=YES, padx=(0, 10))
+
+        right = ttk.Frame(body, width=280)
         right.pack(side=RIGHT, fill=Y)
 
-        # Left: Controls and log
-        controls = ttk.Frame(left)
-        controls.pack(fill=X, pady=(0, 8))
+        # ── Left side ────────────────────────────────────────
 
-        # IP row
-        row = ttk.Frame(controls)
-        row.pack(fill=X, pady=4)
-        ttk.Label(row, text="Phone IP:").pack(side=LEFT)
-        self.ip_entry = ttk.Entry(row, textvariable=self.ip_var, width=26)
-        self.ip_entry.pack(side=LEFT, padx=(8, 8))
+        # Device card
+        self.device_card = DeviceCard(left)
+        self.device_card.pack(fill=X, pady=(0, 8))
 
-        ttk.Button(row, text="Auto-detect", bootstyle="info-outline", command=self._auto_detect_ip).pack(side=LEFT, padx=6)
-        ttk.Button(row, text="Scan network", bootstyle="secondary-outline", command=self._threaded_scan_network).pack(side=LEFT)
+        # Connection section
+        conn = ttk.Labelframe(left, text="  🔗  Connection  ", padding=10)
+        conn.pack(fill=X, pady=(0, 8))
 
-        # Ports/pair code
-        row2 = ttk.Frame(controls)
-        row2.pack(fill=X, pady=4)
-        ttk.Label(row2, text="Pair Port:").pack(side=LEFT)
-        ttk.Entry(row2, textvariable=self.pair_port_var, width=8).pack(side=LEFT, padx=(8, 12))
+        # Row 1: IP + Detect button
+        r1 = ttk.Frame(conn)
+        r1.pack(fill=X, pady=3)
+        ttk.Label(r1, text="IP:", width=5).pack(side=LEFT)
+        self.ip_entry = ttk.Entry(r1, textvariable=self.ip_var, width=22)
+        self.ip_entry.pack(side=LEFT, padx=(0, 6))
+        ttk.Label(r1, text="Port:").pack(side=LEFT, padx=(6, 0))
+        self.port_entry = ttk.Entry(r1, textvariable=self.connect_port_var, width=8)
+        self.port_entry.pack(side=LEFT, padx=(0, 6))
 
-        ttk.Label(row2, text="Connect Port:").pack(side=LEFT)
-        ttk.Entry(row2, textvariable=self.connect_port_var, width=8).pack(side=LEFT, padx=(8, 12))
+        self.btn_detect = ttk.Button(r1, text="🔍 Detect Device",
+                                     bootstyle="info",
+                                     command=self._threaded_discover)
+        self.btn_detect.pack(side=RIGHT)
 
-        ttk.Label(row2, text="Pair Code:").pack(side=LEFT)
-        ttk.Entry(row2, textvariable=self.pair_code_var, width=8, show="*").pack(side=LEFT, padx=(8, 0))
+        # Row 2: Pair fields
+        r2 = ttk.Frame(conn)
+        r2.pack(fill=X, pady=3)
+        ttk.Label(r2, text="Pair:", width=5).pack(side=LEFT)
+        self.pair_port_entry = ttk.Entry(r2, textvariable=self.pair_port_var, width=8)
+        self.pair_port_entry.pack(side=LEFT, padx=(0, 6))
+        ttk.Label(r2, text="Code:").pack(side=LEFT, padx=(6, 0))
+        self.pair_code_entry = ttk.Entry(r2, textvariable=self.pair_code_var,
+                                         width=10, show="*")
+        self.pair_code_entry.pack(side=LEFT, padx=(0, 6))
 
-        # Buttons row
-        btns = ttk.Frame(controls)
-        btns.pack(fill=X, pady=8)
-        ttk.Button(btns, text="Pair", bootstyle="warning", command=self._threaded_pair).pack(side=LEFT, padx=6)
-        ttk.Button(btns, text="Connect", bootstyle="primary", command=self._threaded_connect).pack(side=LEFT, padx=6)
-        ttk.Button(btns, text="Start Mirroring", bootstyle="success", command=self._threaded_start_scrcpy).pack(side=LEFT, padx=6)
-        ttk.Button(btns, text="Disconnect", bootstyle="danger", command=self._threaded_disconnect).pack(side=LEFT, padx=6)
+        # Row 3: Action buttons (wizard-style)
+        btns = ttk.Frame(conn)
+        btns.pack(fill=X, pady=(8, 2))
 
-        # ADB devices combobox
-        devices_frame = ttk.Frame(controls)
-        devices_frame.pack(fill=X, pady=6)
-        ttk.Label(devices_frame, text="ADB devices:").pack(side=LEFT)
+        self.btn_pair = ttk.Button(btns, text="🤝 Pair", bootstyle="warning",
+                                   command=self._threaded_pair, width=14)
+        self.btn_pair.pack(side=LEFT, padx=(0, 4))
+
+        self.btn_connect = ttk.Button(btns, text="🔌 Connect", bootstyle="primary",
+                                      command=self._threaded_connect, width=14)
+        self.btn_connect.pack(side=LEFT, padx=(0, 4))
+
+        self.btn_mirror = ttk.Button(btns, text="▶  Mirror", bootstyle="success",
+                                     command=self._threaded_start_scrcpy, width=14)
+        self.btn_mirror.pack(side=LEFT, padx=(0, 4))
+
+        self.btn_disconnect = ttk.Button(btns, text="⏏  Disconnect",
+                                         bootstyle="danger-outline",
+                                         command=self._threaded_disconnect, width=14)
+        self.btn_disconnect.pack(side=LEFT)
+
+        # One-click Quick Mirror button
+        self.btn_quick = ttk.Button(conn, text="⚡  Quick Mirror — Detect, Connect & Mirror",
+                                    bootstyle="success-outline",
+                                    command=self._threaded_quick_mirror)
+        self.btn_quick.pack(fill=X, pady=(8, 2))
+
+        # ADB devices list
+        dev_frame = ttk.Labelframe(left, text="  📋  ADB Devices  ", padding=8)
+        dev_frame.pack(fill=X, pady=(0, 8))
+
+        dr = ttk.Frame(dev_frame)
+        dr.pack(fill=X)
         self.devices_var = ttk.StringVar()
-        self.devices_combo = ttk.Combobox(devices_frame, textvariable=self.devices_var, width=48, state="readonly")
-        self.devices_combo.pack(side=LEFT, padx=(8, 4))
-        ttk.Button(devices_frame, text="Refresh", bootstyle="outline-info", command=self._refresh_devices).pack(side=LEFT)
+        self.devices_combo = ttk.Combobox(dr, textvariable=self.devices_var,
+                                          state="readonly", width=50)
+        self.devices_combo.pack(side=LEFT, fill=X, expand=YES, padx=(0, 6))
+        ttk.Button(dr, text="↻", bootstyle="outline-info", width=3,
+                   command=self._refresh_devices).pack(side=RIGHT)
+        ttk.Button(dr, text="Use ▸", bootstyle="outline-success", width=6,
+                   command=self._use_selected_device).pack(side=RIGHT, padx=(0, 4))
 
-        # **Create logger before calling _refresh_devices**
-        self.logger = GuiLogger(left, height=18)
+        # Log
+        self.logger = GuiLogger(left, height=14)
         self.logger.pack(fill=BOTH, expand=YES)
 
-        # Now safe to refresh devices (logger is ready)
-        self._refresh_devices()
+        # ── Right side ───────────────────────────────────────
 
-        # Right: actions, progress, settings
-        card = ttk.Labelframe(right, text="Quick Actions", padding=10)
-        card.pack(fill=X, padx=6, pady=6)
+        # QR Code panel
+        qr_card = ttk.Labelframe(right, text="  📷  QR Code  ", padding=10)
+        qr_card.pack(fill=X, pady=(0, 8))
 
-        ttk.Button(card, text="Open scrcpy folder", bootstyle="light", command=self._open_folder).pack(fill=X, pady=4)
-        ttk.Button(card, text="Show log file", bootstyle="light", command=self._open_logfile).pack(fill=X, pady=4)
-        ttk.Button(card, text="Export config", bootstyle="light", command=self._export_config).pack(fill=X, pady=4)
+        self.qr_label = ttk.Label(qr_card, text="Detect a device to\nshow QR code",
+                                  justify=CENTER, foreground="gray")
+        self.qr_label.pack(fill=BOTH, expand=YES, pady=10)
 
-        scan_card = ttk.Labelframe(right, text="Scan & Progress", padding=10)
-        scan_card.pack(fill=X, padx=6, pady=6)
-        self.progress = ttk.Progressbar(scan_card, orient=HORIZONTAL, length=220, mode="determinate")
-        self.progress.pack(fill=X, pady=6)
-        self.progress_label = ttk.Label(scan_card, text="Idle")
-        self.progress_label.pack()
+        ttk.Button(qr_card, text="Copy connect string", bootstyle="outline-secondary",
+                   command=self._copy_connect_string).pack(fill=X, pady=(4, 0))
 
-        settings_card = ttk.Labelframe(right, text="Settings", padding=10)
-        settings_card.pack(fill=X, padx=6, pady=6)
-        ttk.Label(settings_card, text="Scan threads:").pack(anchor=W)
-        self.threads_spin = ttk.Spinbox(settings_card, from_=10, to=500, increment=10, width=8, command=self._update_scan_threads)
+        # Quick scan (ping sweep)
+        scan_card = ttk.Labelframe(right, text="  🌐  Network Scan  ", padding=10)
+        scan_card.pack(fill=X, pady=(0, 8))
+
+        self.progress = ttk.Progressbar(scan_card, mode="determinate")
+        self.progress.pack(fill=X, pady=(0, 4))
+        self.progress_label = ttk.Label(scan_card, text="Idle", foreground="gray")
+        self.progress_label.pack(anchor=W)
+        ttk.Button(scan_card, text="Scan Subnet", bootstyle="secondary-outline",
+                   command=self._threaded_scan_network).pack(fill=X, pady=(6, 0))
+
+        # Settings
+        sets = ttk.Labelframe(right, text="  ⚙️  Settings  ", padding=10)
+        sets.pack(fill=X, pady=(0, 8))
+
+        sr1 = ttk.Frame(sets)
+        sr1.pack(fill=X, pady=2)
+        ttk.Label(sr1, text="Threads:").pack(side=LEFT)
+        self.threads_spin = ttk.Spinbox(sr1, from_=10, to=500, increment=10,
+                                        width=6, command=self._update_scan_threads)
         self.threads_spin.set(self.scan_threads)
-        self.threads_spin.pack(anchor=W, pady=(2, 8))
-        ttk.Label(settings_card, text="Ping timeout (s):").pack(anchor=W)
-        self.timeout_spin = ttk.Spinbox(settings_card, from_=0.2, to=5.0, increment=0.2, width=8, command=self._update_ping_timeout)
+        self.threads_spin.pack(side=LEFT, padx=(4, 12))
+        ttk.Label(sr1, text="Timeout:").pack(side=LEFT)
+        self.timeout_spin = ttk.Spinbox(sr1, from_=0.2, to=5.0, increment=0.2,
+                                        width=6, command=self._update_ping_timeout)
         self.timeout_spin.set(self.ping_timeout)
-        self.timeout_spin.pack(anchor=W, pady=(2, 8))
-        ttk.Button(settings_card, text="Save Settings", bootstyle="info", command=self._save_config).pack(fill=X)
+        self.timeout_spin.pack(side=LEFT, padx=(4, 0))
 
-        # bottom status bar
-        status = ttk.Frame(self, padding=(8, 6))
-        status.pack(fill=X)
-        self.status_label = ttk.Label(status, text="Ready")
+        ttk.Button(sets, text="Save Settings", bootstyle="info-outline",
+                   command=self._do_save_config).pack(fill=X, pady=(6, 0))
+
+        # Theme chooser
+        theme_frame = ttk.Labelframe(right, text="  🎨  Theme  ", padding=10)
+        theme_frame.pack(fill=X)
+        ttk.Combobox(theme_frame, values=ttk.Style().theme_names(),
+                     textvariable=self.theme_var, width=16,
+                     state="readonly").pack(fill=X)
+
+        # ── Bottom status bar ────────────────────────────────
+        bottom = ttk.Frame(self, padding=(10, 6))
+        bottom.pack(fill=X, side=BOTTOM)
+        ttk.Separator(bottom, orient=HORIZONTAL).pack(fill=X, pady=(0, 4))
+        self.status_label = ttk.Label(bottom, text="● Ready", foreground="gray")
         self.status_label.pack(side=LEFT)
 
-    
-    # ---------- UI actions and threaded wrappers ----------
-    def _on_theme_change(self, event=None):
+        # IP/port change triggers QR update
+        self.ip_var.trace_add("write", lambda *_: self._update_qr())
+        self.connect_port_var.trace_add("write", lambda *_: self._update_qr())
+
+    # ==========================================================
+    #  QR Code
+    # ==========================================================
+
+    def _update_qr(self):
+        ip = self.ip_var.get().strip()
+        port = self.connect_port_var.get().strip()
+        if not ip:
+            return
+        connect_str = f"adb connect {ip}:{port}" if port else f"adb connect {ip}"
+        try:
+            img = generate_qr_pil(connect_str, box_size=5, border=2)
+            # resize to fit panel
+            img = img.resize((180, 180), Image.LANCZOS)
+            self._qr_photo = ImageTk.PhotoImage(img)
+            self.qr_label.config(image=self._qr_photo, text="")
+        except Exception as e:
+            self.logger.log(f"QR generation error: {e}", "warning")
+
+    def _copy_connect_string(self):
+        ip = self.ip_var.get().strip()
+        port = self.connect_port_var.get().strip()
+        if not ip:
+            return
+        s = f"adb connect {ip}:{port}" if port else f"adb connect {ip}"
+        self.clipboard_clear()
+        self.clipboard_append(s)
+        self.logger.log(f"Copied: {s}", "info")
+
+    # ==========================================================
+    #  Theme
+    # ==========================================================
+
+    def _on_theme_change(self):
         theme = self.theme_var.get()
         try:
             self.style.theme_use(theme)
-            self.logger.log(f"Theme changed to {theme}", "blue")
             self._save_config()
-        except Exception as e:
-            self.logger.log(f"Failed to change theme: {e}", "error")
+        except Exception:
+            pass
+
+    # ==========================================================
+    #  Settings spinbox callbacks
+    # ==========================================================
 
     def _update_scan_threads(self):
         try:
             self.scan_threads = int(self.threads_spin.get())
-            self.logger.log(f"Scan threads set to {self.scan_threads}", "debug")
         except Exception:
             pass
 
     def _update_ping_timeout(self):
         try:
             self.ping_timeout = float(self.timeout_spin.get())
-            self.logger.log(f"Ping timeout set to {self.ping_timeout}s", "debug")
         except Exception:
             pass
 
-    def _open_folder(self):
-        folder = os.getcwd()
-        self.logger.log(f"Opening folder: {folder}", "info")
-        if sys.platform.startswith("win"):
-            os.startfile(folder)
-        else:
-            subprocess.run(["xdg-open", folder])
+    def _do_save_config(self):
+        self._save_config()
+        self.logger.log("Settings saved.", "success")
+        self._update_qr()
 
-    def _open_logfile(self):
-        self.logger.log(f"Opening log file: {LOG_FILE}", "info")
-        if sys.platform.startswith("win"):
-            os.startfile(LOG_FILE)
-        else:
-            subprocess.run(["xdg-open", LOG_FILE])
+    # ==========================================================
+    #  ADB device management
+    # ==========================================================
 
-    def _export_config(self):
-        try:
-            dst = os.path.join(os.getcwd(), "settings_export.ini")
-            with open(dst, "w", encoding="utf-8") as f:
-                self.config_parser.write(f)
-            self.logger.log(f"Config exported to {dst}", "success")
-            Messagebox.ok(message=f"Exported to:\n{dst}", title="Export complete")
-        except Exception as e:
-            self.logger.log(f"Export failed: {e}", "error")
-
-    # ---------- ADB helpers ----------
     def _refresh_devices(self):
-        self.logger.log("Refreshing adb devices...", "info")
+        self.logger.log("Refreshing ADB devices...", "info")
         devices = adb_devices_list()
         if not devices:
-            self.logger.log("No adb devices found.", "warning")
+            self.logger.log("No ADB devices found.", "warning")
             self.devices_combo["values"] = []
             self.devices_var.set("")
             return
-        vals = [f"{d['serial']} ({d['state']}) {d['info']}" for d in devices]
+        vals = []
+        for d in devices:
+            model = parse_device_model(d["info"])
+            label = f"{d['serial']}  —  {model}  ({d['state']})" if model else \
+                    f"{d['serial']}  ({d['state']})"
+            vals.append(label)
         self.devices_combo["values"] = vals
         self.devices_var.set(vals[0])
-        self.logger.log(f"Found {len(devices)} adb device(s).", "success")
+        self.logger.log(f"Found {len(devices)} ADB device(s).", "success")
+
+    def _use_selected_device(self):
+        """Fill IP/port from the selected ADB device entry."""
+        label = self.devices_var.get()
+        if not label:
+            return
+        serial = label.split("  ")[0].strip()
+
+        # If it's an IP:port serial
+        if ":" in serial and not serial.startswith("adb-"):
+            ip, port = serial.rsplit(":", 1)
+            self.ip_var.set(ip)
+            self.connect_port_var.set(port)
+            self._update_qr()
+
+        # If it's an adb- mDNS serial, look up from adb devices
+        for dev in adb_devices_list():
+            if dev["serial"] == serial:
+                # Extract IP from info if available
+                ip_match = re.search(r"(\d+\.\d+\.\d+\.\d+):(\d+)", dev["serial"])
+                if ip_match:
+                    self.ip_var.set(ip_match.group(1))
+                    self.connect_port_var.set(ip_match.group(2))
+                    self._update_qr()
+                model = parse_device_model(dev["info"])
+                self.device_card.set_device(model or serial, self.ip_var.get(),
+                                            self.connect_port_var.get(), serial, "ready")
+                break
+
+        self.logger.log(f"Selected device: {serial}", "info")
+
+    # ==========================================================
+    #  Device Discovery  (THE FIX: uses adb mdns, not local IP)
+    # ==========================================================
+
+    def _threaded_discover(self):
+        self.btn_detect.config(state=DISABLED, text="⏳ Detecting…")
+        threading.Thread(target=self._discover_device, daemon=True).start()
+
+    def _discover_device(self):
+        self.logger.log("Scanning for Android devices via ADB + mDNS…", "info")
+        devices = full_discover()
+
+        def _update_ui():
+            self.btn_detect.config(state=NORMAL, text="🔍 Detect Device")
+            if not devices:
+                self.logger.log("No Android devices found.  Make sure USB/Wireless Debugging "
+                                "is enabled.", "warning")
+                self.device_card.clear()
+                return
+
+            # Pick the best device: prefer connected ones, then mDNS
+            best = None
+            for d in devices:
+                if d["state"] == "device":
+                    best = d
+                    break
+            if not best:
+                best = devices[0]
+
+            self.ip_var.set(best["ip"])
+            if best["port"]:
+                self.connect_port_var.set(best["port"])
+
+            self.device_card.set_device(
+                model=best["model"],
+                ip=best["ip"],
+                port=best["port"],
+                serial=best["serial"],
+                status="ready" if best["state"] == "device" else "detected",
+            )
+
+            self.logger.log(
+                f"Found: {best['model']}  ({best['ip']}:{best['port']})  "
+                f"[{best['source']}]",
+                "success",
+            )
+
+            # Update ADB devices list
+            self._refresh_devices()
+            self._update_qr()
+            self._save_config()
+
+        self._schedule(_update_ui)
+
+    # ==========================================================
+    #  Pair / Connect / Disconnect / Mirror
+    # ==========================================================
 
     def _threaded_pair(self):
         threading.Thread(target=self._pair_device, daemon=True).start()
@@ -393,23 +758,22 @@ class ScrcpyLauncher(ttk.Window):
         port = self.pair_port_var.get().strip()
         code = self.pair_code_var.get().strip()
         if not ip or not port or not code:
-            self.logger.log("Please fill IP, pair port and pairing code.", "error")
+            self.logger.log("Fill IP, pair port, and pairing code first.", "error")
             return
-        self.logger.log(f"Initiating pairing to {ip}:{port} ...", "info")
-        # start pairing and send code to stdin
-        # Use run_cmd with input to send code
-        out, err, rc = run_cmd(["adb", "pair", f"{ip}:{port}"], input_text=code + "\n", timeout=8)
+        self.logger.log(f"Pairing to {ip}:{port}…", "info")
+        out, err, rc = run_cmd(["adb", "pair", f"{ip}:{port}"],
+                               input_text=code + "\n", timeout=10)
         if rc == 0 and "paired" in out.lower():
-            self.logger.log("Pairing successful!", "success")
+            self.logger.log("✓ Paired successfully!", "success")
             self._save_config()
         else:
-            # try second approach: run pair, then echo
+            # fallback: shell echo
             out2, err2, rc2 = run_cmd(f'echo {code} | adb pair {ip}:{port}')
             if rc2 == 0 and "paired" in (out2.lower() + err2.lower()):
-                self.logger.log("Pairing successful (via echo)!", "success")
+                self.logger.log("✓ Paired successfully!", "success")
                 self._save_config()
             else:
-                self.logger.log(f"Pair failed. stdout:{out} stderr:{err} stdout2:{out2} stderr2:{err2}", "error")
+                self.logger.log(f"Pair failed.  {out} {err}", "error")
 
     def _threaded_connect(self):
         threading.Thread(target=self._connect_device, daemon=True).start()
@@ -418,16 +782,17 @@ class ScrcpyLauncher(ttk.Window):
         ip = self.ip_var.get().strip()
         port = self.connect_port_var.get().strip()
         if not ip or not port:
-            self.logger.log("Please set IP and connect port.", "error")
+            self.logger.log("Set IP and port first.", "error")
             return
-        self.logger.log(f"Connecting to {ip}:{port} ...", "info")
-        out, err, rc = run_cmd(["adb", "connect", f"{ip}:{port}"], timeout=6)
+        self.logger.log(f"Connecting to {ip}:{port}…", "info")
+        out, err, rc = run_cmd(["adb", "connect", f"{ip}:{port}"], timeout=8)
         if rc == 0 and ("connected" in out.lower() or "already" in out.lower()):
-            self.logger.log("Connected to device.", "success")
+            self.logger.log("✓ Connected!", "success")
             self._save_config()
-            # refresh devices list after connect
-            time.sleep(0.7)
-            self._refresh_devices()
+            self.after(500, self._refresh_devices)
+            self.after(600, lambda: self.device_card.set_device(
+                self.device_card._model_var.get(), ip, port,
+                self.device_card.serial, "connected"))
         else:
             self.logger.log(f"Connect failed: {out} {err}", "error")
 
@@ -437,13 +802,16 @@ class ScrcpyLauncher(ttk.Window):
     def _disconnect_device(self):
         ip = self.ip_var.get().strip()
         if not ip:
-            self.logger.log("Please enter IP to disconnect.", "error")
+            self.logger.log("No IP to disconnect.", "error")
             return
-        self.logger.log(f"Disconnecting {ip} ...", "info")
-        out, err, rc = run_cmd(["adb", "disconnect", ip], timeout=4)
+        self.logger.log(f"Disconnecting {ip}…", "info")
+        out, err, rc = run_cmd(["adb", "disconnect", ip], timeout=5)
         if rc == 0:
-            self.logger.log("Disconnected.", "success")
-            self._refresh_devices()
+            self.logger.log("✓ Disconnected.", "success")
+            self._schedule(self._refresh_devices)
+            self._schedule(lambda: self.device_card.set_device(
+                self.device_card._model_var.get(), ip,
+                self.connect_port_var.get(), self.device_card.serial, "idle"))
         else:
             self.logger.log(f"Disconnect failed: {err or out}", "error")
 
@@ -454,54 +822,126 @@ class ScrcpyLauncher(ttk.Window):
         ip = self.ip_var.get().strip()
         port = self.connect_port_var.get().strip()
         if not ip or not port:
-            self.logger.log("IP/port missing; cannot start scrcpy.", "error")
+            self.logger.log("Set IP and port first.", "error")
             return
-        self.logger.log(f"Starting scrcpy for {ip}:{port} ...", "info")
-        # Launch scrcpy non-blocking
+        self.logger.log(f"Starting scrcpy for {ip}:{port}…", "info")
         try:
-            # Use subprocess.Popen so the UI doesn't block
             subprocess.Popen(["scrcpy", "-s", f"{ip}:{port}"])
-            self.logger.log("scrcpy started (external window).", "success")
+            self.logger.log("✓ scrcpy launched!", "success")
+            self._schedule(lambda: self.device_card.set_device(
+                self.device_card._model_var.get(), ip, port,
+                self.device_card.serial, "mirroring"))
+        except FileNotFoundError:
+            self.logger.log("scrcpy not found in PATH.  Make sure scrcpy.exe is "
+                            "in this folder or on PATH.", "error")
         except Exception as e:
             self.logger.log(f"Failed to start scrcpy: {e}", "error")
 
-    # ---------- Auto-detect & Scan ----------
-    def _auto_detect_ip(self):
-        self.logger.log("Auto-detecting local IP...", "info")
-        ip = get_local_ip()
-        self.ip_var.set(detected_ip)
-        self.connect_port_var.set(detected_port)
+    # ==========================================================
+    #  Quick Mirror — one-click detect → connect → mirror
+    # ==========================================================
 
-        if ip:
+    def _threaded_quick_mirror(self):
+        self.btn_quick.config(state=DISABLED, text="⏳ Working…")
+        threading.Thread(target=self._quick_mirror, daemon=True).start()
+
+    def _quick_mirror(self):
+        """One-click flow: detect device → connect → start scrcpy."""
+        def re_enable():
+            self.btn_quick.config(state=NORMAL,
+                                  text="⚡  Quick Mirror — Detect, Connect & Mirror")
+
+        # Step 1: Discover
+        self.logger.log("Quick Mirror: scanning for devices…", "info")
+        devices = full_discover()
+        if not devices:
+            self.logger.log("Quick Mirror: no devices found.  Enable USB/Wireless "
+                            "Debugging and try again.", "error")
+            self._schedule(re_enable)
+            return
+
+        best = None
+        for d in devices:
+            if d["state"] == "device":
+                best = d
+                break
+        if not best:
+            best = devices[0]
+
+        ip = best["ip"]
+        port = best["port"]
+        model = best["model"]
+
+        # Update UI
+        def update_ui():
             self.ip_var.set(ip)
-            self.logger.log(f"Detected local IP: {ip}", "success")
-        else:
-            self.logger.log("Could not auto-detect local IP.", "error")
+            if port:
+                self.connect_port_var.set(port)
+            self.device_card.set_device(model, ip, port, best["serial"], "connecting")
+            self._update_qr()
+        self._schedule(update_ui)
+
+        self.logger.log(f"Quick Mirror: found {model or ip} at {ip}:{port}", "success")
+
+        # Step 2: Connect
+        self.logger.log(f"Quick Mirror: connecting to {ip}:{port}…", "info")
+        out, err, rc = run_cmd(["adb", "connect", f"{ip}:{port}"], timeout=8)
+        connected = rc == 0 and ("connected" in out.lower() or "already" in out.lower())
+        if not connected:
+            self.logger.log(f"Quick Mirror: connect failed — {out} {err}", "error")
+            self._schedule(re_enable)
+            return
+
+        self.logger.log("Quick Mirror: connected!", "success")
+        self._schedule(lambda: self.device_card.set_device(
+            model, ip, port, best["serial"], "connected"))
+
+        # Step 3: Start scrcpy
+        self.logger.log(f"Quick Mirror: launching scrcpy…", "info")
+        try:
+            subprocess.Popen(["scrcpy", "-s", f"{ip}:{port}"])
+            self.logger.log("Quick Mirror: ✓ scrcpy launched!", "success")
+            self._schedule(lambda: self.device_card.set_device(
+                model, ip, port, best["serial"], "mirroring"))
+        except FileNotFoundError:
+            self.logger.log("Quick Mirror: scrcpy.exe not found in PATH.", "error")
+        except Exception as e:
+            self.logger.log(f"Quick Mirror: failed to start scrcpy — {e}", "error")
+
+        self._schedule(re-enable)
+        self._save_config()
+
+    # ==========================================================
+    #  Network scan (subnet ping sweep — unchanged logic, improved UI)
+    # ==========================================================
 
     def _threaded_scan_network(self):
         threading.Thread(target=self._scan_network, daemon=True).start()
 
     def _scan_network(self):
-        self._update_scan_threads()  # sync
+        self._update_scan_threads()
         self._update_ping_timeout()
         local_ip = get_local_ip()
         if not local_ip:
-            self.logger.log("Cannot detect local IP. Auto-detect failed.", "error")
+            self.logger.log("Cannot detect local IP.", "error")
             return
 
         subnet = local_ip.rsplit(".", 1)[0] + "."
         ips = [subnet + str(i) for i in range(1, 255)]
         found = []
-        self.progress["maximum"] = len(ips)
-        self.progress["value"] = 0
-        self.progress_label.config(text="Scanning...")
 
-        self.logger.log(f"Scanning subnet {subnet}0/24 using {self.scan_threads} threads...", "info")
+        def _init():
+            self.progress["maximum"] = len(ips)
+            self.progress["value"] = 0
+            self.progress_label.config(text="Scanning…")
+        self._schedule(_init)
+
+        self.logger.log(f"Scanning {subnet}0/24 ({self.scan_threads} threads)…", "info")
         with ThreadPoolExecutor(max_workers=self.scan_threads) as ex:
-            futures = {ex.submit(ping_host, ip, self.ping_timeout): ip for ip in ips}
-            completed = 0
-            for fut in as_completed(futures):
-                ip = futures[fut]
+            futs = {ex.submit(ping_host, ip, self.ping_timeout): ip for ip in ips}
+            done = 0
+            for fut in as_completed(futs):
+                ip = futs[fut]
                 try:
                     ok = fut.result()
                 except Exception:
@@ -509,55 +949,42 @@ class ScrcpyLauncher(ttk.Window):
                 if ok:
                     found.append(ip)
                     self.logger.log(f"Host alive: {ip}", "success")
-                completed += 1
-                self.progress["value"] = completed
-            # finished
-        self.progress_label.config(text=f"Scan complete ({len(found)} found)")
-        if found:
-            # set first found IP as convenience
-            self.ip_var.set(found[0])
-            self.logger.log(f"Scan found {len(found)} hosts. First set to {found[0]}", "info")
-        else:
-            self.logger.log("No hosts found on the subnet.", "warning")
-        # reset progress after short pause
-        time.sleep(0.6)
-        self.progress["value"] = 0
+                done += 1
+                self._schedule(self._update_progress, done)
 
-    # ---------- Save config shortly -----------
-    def _save_config(self):
-        self._save_config = self._save_config  # placeholder to avoid linter confusion
-        try:
-            self._save_config_impl()
-            self.logger.log("Settings saved.", "success")
-        except Exception as e:
-            self.logger.log(f"Failed saving settings: {e}", "error")
+        def _finish():
+            self.progress_label.config(text=f"Done — {len(found)} host(s)")
+            if found:
+                self.ip_var.set(found[0])
+                self._update_qr()
+                self.logger.log(f"Scan found {len(found)} host(s).  "
+                                f"First: {found[0]}", "info")
+            else:
+                self.logger.log("No hosts found.", "warning")
+            self.after(800, lambda: self._update_progress(0))
+        self._schedule(_finish)
 
-    def _save_config_impl(self):
-        # commit current values to config file
-        self._save_config_impl = getattr(self, "_save_config_impl")
-        self.config_parser["DEFAULT"]["IP"] = self.ip_var.get().strip()
-        self.config_parser["DEFAULT"]["PairPort"] = self.pair_port_var.get().strip()
-        self.config_parser["DEFAULT"]["ConnectPort"] = self.connect_port_var.get().strip()
-        self.config_parser["DEFAULT"]["PairCode"] = self.pair_code_var.get().strip()
-        self.config_parser["DEFAULT"]["Theme"] = self.theme_var.get().strip()
-        self.config_parser["DEFAULT"]["ScanThreads"] = str(self.scan_threads)
-        self.config_parser["DEFAULT"]["PingTimeoutSec"] = str(self.ping_timeout)
-        with open(CONFIG_FILE, "w") as f:
-            self.config_parser.write(f)
+    def _update_progress(self, value):
+        self.progress["value"] = value
+
+    # ==========================================================
+    #  Window close
+    # ==========================================================
 
     def on_close(self):
-        # save config
         try:
-            self._save_config_impl()
+            self._save_config()
         except Exception:
             pass
         self.destroy()
 
 
-# ---------- Entrypoint ----------
+# ============================================================
+#  Entrypoint
+# ============================================================
+
 def main():
     app = ScrcpyLauncher()
-    # attach window close event
     app.protocol("WM_DELETE_WINDOW", app.on_close)
     app.mainloop()
 

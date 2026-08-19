@@ -1,0 +1,40 @@
+# Settings with plaintext pair codes — should not be committed
+settings.ini
+settings_export.ini
+
+# Log files
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# PyInstaller
+*.spec
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Windows
+*.lnk
+Thumbs.db
+desktop.ini
+
+# macOS
+.DS_Store

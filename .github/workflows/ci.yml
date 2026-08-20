@@ -30,7 +30,9 @@ jobs:
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pip
+          path: |
+            ~/.cache/pip
+            ~\AppData\Local\pip\Cache
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
@@ -44,14 +46,15 @@ jobs:
       - name: Lint with flake8
         run: |
           # stop on syntax errors or undefined names
-          flake8 mirror.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 mirror.py mirror_glass.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 ui/ --count --select=E9,F63,F7,F82 --show-source --statistics
           # exit-zero treats all errors as warnings
-          flake8 mirror.py --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
+          flake8 mirror.py mirror_glass.py ui/ --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
 
       - name: Security scan with bandit
         if: matrix.os == 'ubuntu-latest'
         run: |
-          bandit -r mirror.py -ll --format screen
+          bandit -r mirror.py mirror_glass.py ui/ -ll --format screen
 
       - name: Run tests
         run: |
@@ -74,7 +77,7 @@ jobs:
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pip
+          path: ~\AppData\Local\pip\Cache
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
@@ -85,13 +88,24 @@ jobs:
           pip install pyinstaller
           pip install -r requirements.txt
 
-      - name: Build executable
+      - name: Build classic UI executable
         run: |
           pyinstaller --onefile --windowed --name MirrorPy mirror.py
 
-      - name: Upload artifact
+      - name: Build glassmorphism UI executable
+        run: |
+          pyinstaller --onefile --windowed --name MirrorPyGlass mirror_glass.py --add-data "ui;ui"
+
+      - name: Upload classic artifact
         uses: actions/upload-artifact@v4
         with:
           name: MirrorPy-windows
           path: dist/MirrorPy.exe
+          retention-days: 30
+
+      - name: Upload glassmorphism artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MirrorPyGlass-windows
+          path: dist/MirrorPyGlass.exe
           retention-days: 30

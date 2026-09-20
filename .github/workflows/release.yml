@@ -27,7 +27,7 @@ jobs:
 
       - name: Run tests
         run: |
-          python -m unittest test_mirror -v
+          cd legacy && python -m unittest test_mirror -v
 
   build:
     needs: test
@@ -73,23 +73,43 @@ jobs:
 
       - name: Build classic UI executable
         run: |
-          pyinstaller --onefile --windowed --name MirrorPy mirror.py
+          cd legacy
+          EXTRA=()
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # adb, scrcpy, and the DLLs scrcpy links against must ship with the
+            # exe or the download cannot mirror anything.
+            EXTRA+=(--add-binary "../adb.exe;." --add-binary "../scrcpy.exe;." --add-binary "../scrcpy-server;.")
+            for dll in AdbWinApi.dll AdbWinUsbApi.dll SDL2.dll avcodec-61.dll avformat-61.dll avutil-59.dll swresample-5.dll libusb-1.0.dll; do
+              EXTRA+=(--add-binary "../$dll;.")
+            done
+          fi
+          EXTRA+=(--add-data "../ui;ui")
+          pyinstaller --onefile --windowed --name MirrorPy mirror.py "${EXTRA[@]}"
 
       - name: Build glassmorphism UI executable
         run: |
-          pyinstaller --onefile --windowed --name MirrorPyGlass mirror_glass.py --add-data "ui;ui"
+          cd legacy
+          EXTRA=()
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            EXTRA+=(--add-binary "../adb.exe;." --add-binary "../scrcpy.exe;." --add-binary "../scrcpy-server;.")
+            for dll in AdbWinApi.dll AdbWinUsbApi.dll SDL2.dll avcodec-61.dll avformat-61.dll avutil-59.dll swresample-5.dll libusb-1.0.dll; do
+              EXTRA+=(--add-binary "../$dll;.")
+            done
+          fi
+          EXTRA+=(--add-data "../ui;ui")
+          pyinstaller --onefile --windowed --name MirrorPyGlass mirror_glass.py "${EXTRA[@]}"
 
       - name: Upload classic artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_classic }}
-          path: dist/MirrorPy${{ matrix.ext_classic }}
+          path: legacy/dist/MirrorPy${{ matrix.ext_classic }}
 
       - name: Upload glassmorphism artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_glass }}
-          path: dist/MirrorPyGlass${{ matrix.ext_glass }}
+          path: legacy/dist/MirrorPyGlass${{ matrix.ext_glass }}
 
   release:
     needs: build

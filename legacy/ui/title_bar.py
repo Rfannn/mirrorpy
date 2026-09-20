@@ -1,9 +1,9 @@
 import tkinter as tk
-from ui.theme import Colors, Fonts, Geo
+from ui.theme import get_palette, Fonts, Geo
 
 class GlassTitleBar(tk.Frame):
     def __init__(self, master, title="MirrorPy", on_close=None, on_minimize=None, on_maximize=None, **kw):
-        self._c = Colors()
+        self._c = get_palette()
         super().__init__(master, bg=self._c.BG_TITLEBAR, height=Geo.TITLEBAR_HEIGHT, **kw)
         self.pack_propagate(False)
         self._on_close = on_close

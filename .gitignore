@@ -5,6 +5,9 @@ settings_export.ini
 # Log files
 *.log
 
+# Screenshots captured from the device
+screenshots/
+
 # Python
 __pycache__/
 *.pyc

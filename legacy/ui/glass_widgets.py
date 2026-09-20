@@ -3,7 +3,7 @@ MirrorPy Glass Widgets
 """
 
 import tkinter as tk
-from ui.theme import Colors, Fonts, Anim, Geo
+from ui.theme import get_palette, Fonts, Geo
 
 
 def _rounded_rect(canvas, x1, y1, x2, y2, r, **kwargs):
@@ -17,7 +17,7 @@ def _color_blend(c1, c2, t):
     return "#%02x%02x%02x" % (r, g, b)
 class GlassPanel(tk.Frame):
     def __init__(self, master, title="", icon="", accent_color=None, collapsible=False, **kw):
-        self._c = Colors()
+        self._c = get_palette()
         self._bg = kw.pop("bg", self._c.BG_PANEL)
         self._bdr = kw.pop("highlightbackground", self._c.BORDER_GLASS)
         super().__init__(master, bg=self._c.BG_DEEP, **kw)
@@ -59,18 +59,21 @@ class GlassPanel(tk.Frame):
 
 class GlassButton(tk.Canvas):
     def __init__(self, master, text="", icon="", command=None,
-                 style="primary", width=120, height=36, **kw):
-        self._c = Colors()
+                 style="primary", width=120, height=36, enabled=True, **kw):
+        self._c = get_palette()
         self._cmd = command; self._style = style
         self._hovered = False; self._pressed = False
+        self._enabled = enabled
         self._text = "%s  %s" % (icon, text) if icon else text
         super().__init__(master, width=width, height=height,
-                         bg=self._c.BG_DEEP, highlightthickness=0, bd=0, cursor="hand2", **kw)
-        self._w = width; self._h = height; self._draw()
-        self.bind("<Enter>", self._on_enter)
-        self.bind("<Leave>", self._on_leave)
-        self.bind("<ButtonPress-1>", self._on_press)
-        self.bind("<ButtonRelease-1>", self._on_release)
+                         bg=self._c.BG_DEEP, highlightthickness=0, bd=0,
+                         cursor="hand2" if enabled else "", **kw)
+        self._gw = width; self._gh = height; self._draw()
+        if enabled:
+            self.bind("<Enter>", self._on_enter)
+            self.bind("<Leave>", self._on_leave)
+            self.bind("<ButtonPress-1>", self._on_press)
+            self.bind("<ButtonRelease-1>", self._on_release)
 
     def _sc(self):
         s = {"primary":(self._c.ACCENT_PRIMARY, self._c.TEXT_ON_ACCENT),
@@ -85,15 +88,19 @@ class GlassButton(tk.Canvas):
     def _draw(self):
         self.delete("all"); bg, fg = self._sc()
         r = Geo.BUTTON_CORNER_RADIUS
-        if self._hovered:
+        if not self._enabled:
+            fill = _color_blend(bg, self._c.BG_DEEP, 0.78)
+            bdr = _color_blend(fill, self._c.TEXT_MUTED, 0.25)
+            fg = self._c.TEXT_MUTED
+        elif self._hovered:
             fill = _color_blend(bg, "#ffffff", 0.15)
             bdr = _color_blend(bg, "#ffffff", 0.3)
         elif self._pressed:
             fill = _color_blend(bg, "#000000", 0.15); bdr = bg
         else:
             fill = bg; bdr = _color_blend(bg, "#ffffff", 0.1)
-        _rounded_rect(self, 1, 1, self._w-1, self._h-1, r, fill=fill, outline=bdr, width=1)
-        self.create_text(self._w//2, self._h//2, text=self._text,
+        _rounded_rect(self, 1, 1, self._gw-1, self._gh-1, r, fill=fill, outline=bdr, width=1)
+        self.create_text(self._gw//2, self._gh//2, text=self._text,
                          font=Fonts.BUTTON_BOLD, fill=fg, anchor="center")
 
     def _on_enter(self, e): self._hovered = True; self._draw()
@@ -107,13 +114,24 @@ class GlassButton(tk.Canvas):
         self._text = "%s  %s" % (icon, text) if icon else text; self._draw()
 
     def configure_state(self, state):
-        if state == "disabled": self.configure(cursor=""); self.unbind("<ButtonRelease-1>")
-        else: self.configure(cursor="hand2"); self.bind("<ButtonRelease-1>", self._on_release)
+        self._enabled = state != "disabled"
+        for seq in ("<Enter>", "<Leave>", "<ButtonPress-1>", "<ButtonRelease-1>"):
+            self.unbind(seq)
+        if self._enabled:
+            self.configure(cursor="hand2")
+            self.bind("<Enter>", self._on_enter)
+            self.bind("<Leave>", self._on_leave)
+            self.bind("<ButtonPress-1>", self._on_press)
+            self.bind("<ButtonRelease-1>", self._on_release)
+        else:
+            self._hovered = self._pressed = False
+            self.configure(cursor="")
+        self._draw()
 
 
 class GlassEntry(tk.Frame):
     def __init__(self, master, textvariable=None, placeholder="", width=20, show="", **kw):
-        self._c = Colors()
+        self._c = get_palette()
         super().__init__(master, bg=self._c.BG_DEEP, **kw)
         self._ph = placeholder
         self._cv = tk.Canvas(self, height=32, bg=self._c.BG_DEEP, highlightthickness=0, bd=0)
@@ -153,11 +171,11 @@ class GlassEntry(tk.Frame):
 
 class GlassToggle(tk.Canvas):
     def __init__(self, master, variable=None, command=None, **kw):
-        self._c = Colors()
+        self._c = get_palette()
         w, h = Geo.TOGGLE_WIDTH, Geo.TOGGLE_HEIGHT
         super().__init__(master, width=w, height=h, bg=self._c.BG_DEEP, highlightthickness=0, bd=0, cursor="hand2", **kw)
         self._var = variable or tk.BooleanVar(value=False)
-        self._cmd = command; self._w = w; self._h = h
+        self._cmd = command; self._gw = w; self._gh = h
         self.bind("<Button-1>", self._toggle); self._draw()
 
     @property
@@ -168,37 +186,37 @@ class GlassToggle(tk.Canvas):
         if self._cmd: self._cmd()
 
     def _draw(self):
-        self.delete("all"); on = self._var.get(); r = self._h // 2
+        self.delete("all"); on = self._var.get(); r = self._gh // 2
         tc = self._c.ACCENT_CYAN if on else self._c.BORDER_SUBTLE
-        pts = [r,0, self._w-r,0, self._w,0, self._w,r, self._w,self._h-r, self._w,self._h, self._w-r,self._h, r,self._h, 0,self._h, 0,self._h-r, 0,r, 0,0]
+        pts = [r,0, self._gw-r,0, self._gw,0, self._gw,r, self._gw,self._gh-r, self._gw,self._gh, self._gw-r,self._gh, r,self._gh, 0,self._gh, 0,self._gh-r, 0,r, 0,0]
         self.create_polygon(pts, smooth=True, fill=tc, outline="")
         dr = Geo.TOGGLE_DOT_RADIUS
-        cx = (self._w - 2*dr) if on else dr; cy = self._h // 2
+        cx = (self._gw - 2*dr) if on else dr; cy = self._gh // 2
         self.create_oval(cx-dr, cy-dr, cx+dr, cy+dr, fill=self._c.TEXT_ON_ACCENT, outline="")
 
 
 class GlassSlider(tk.Canvas):
     def __init__(self, master, from_=0, to=100, variable=None, command=None, width=200, **kw):
-        self._c = Colors(); self._from = from_; self._to = to
+        self._c = get_palette(); self._from = from_; self._to = to
         self._var = variable or tk.DoubleVar(value=from_)
         self._cmd = command; self._th = 6; self._tr = 8; self._drag = False
         super().__init__(master, width=width, height=28, bg=self._c.BG_DEEP, highlightthickness=0, bd=0, cursor="hand2", **kw)
-        self._w = width
+        self._gw = width
         self.bind("<Button-1>", self._clk)
         self.bind("<B1-Motion>", self._drg)
         self.bind("<ButtonRelease-1>", self._rel); self._draw()
 
     def _v2x(self, v):
         f = (v - self._from) / max(self._to - self._from, 1)
-        m = self._tr + 2; return m + f * (self._w - 2*m)
+        m = self._tr + 2; return m + f * (self._gw - 2*m)
 
     def _x2v(self, x):
-        m = self._tr + 2; f = max(0, min(1, (x - m) / max(self._w - 2*m, 1)))
+        m = self._tr + 2; f = max(0, min(1, (x - m) / max(self._gw - 2*m, 1)))
         return self._from + f * (self._to - self._from)
 
     def _draw(self):
         self.delete("all"); v = self._var.get(); cx = self._v2x(v); cy = 14; r = self._tr
-        self.create_rectangle(r+2, cy-self._th//2, self._w-r-2, cy+self._th//2, fill=self._c.BORDER_SUBTLE, outline="")
+        self.create_rectangle(r+2, cy-self._th//2, self._gw-r-2, cy+self._th//2, fill=self._c.BORDER_SUBTLE, outline="")
         self.create_rectangle(r+2, cy-self._th//2, cx, cy+self._th//2, fill=self._c.ACCENT_PRIMARY, outline="")
         self.create_oval(cx-r, cy-r, cx+r, cy+r, fill=self._c.ACCENT_PRIMARY, outline=self._c.TEXT_ON_ACCENT, width=2)
 
@@ -212,7 +230,7 @@ class GlassSlider(tk.Canvas):
 
 class GlassBadge(tk.Canvas):
     def __init__(self, master, text="", color=None, **kw):
-        self._c = Colors(); self._color = color or self._c.ACCENT_CYAN; self._text = text
+        self._c = get_palette(); self._color = color or self._c.ACCENT_CYAN; self._text = text
         super().__init__(master, width=max(len(text)*7+16, 40), height=20,
                          bg=self._c.BG_DEEP, highlightthickness=0, bd=0, **kw)
         self._draw()
@@ -233,7 +251,7 @@ class GlassBadge(tk.Canvas):
 
 class GlassLabel(tk.Label):
     def __init__(self, master, **kw):
-        self._c = Colors()
+        self._c = get_palette()
         kw.setdefault("bg", self._c.BG_DEEP); kw.setdefault("fg", self._c.TEXT_PRIMARY)
         kw.setdefault("font", Fonts.BODY); kw.setdefault("anchor", "w")
         super().__init__(master, **kw)
@@ -241,7 +259,7 @@ class GlassLabel(tk.Label):
 
 class GlassSeparator(tk.Canvas):
     def __init__(self, master, **kw):
-        self._c = Colors()
+        self._c = get_palette()
         super().__init__(master, height=1, bg=self._c.BG_DEEP, highlightthickness=0, bd=0, **kw)
         self.bind("<Configure>", self._draw)
     def _draw(self, e=None):

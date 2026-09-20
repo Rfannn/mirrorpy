@@ -1,10 +1,10 @@
 import tkinter as tk
-from ui.theme import Colors, Fonts
-from ui.glass_widgets import GlassPanel, GlassLabel, GlassSeparator
+from ui.theme import get_palette, Fonts
+from ui.glass_widgets import GlassSeparator
 
 class AboutPage(tk.Frame):
     def __init__(self, master, **kw):
-        self._c = Colors()
+        self._c = get_palette()
         super().__init__(master, bg=self._c.BG_DEEP, **kw)
         self._build()
 

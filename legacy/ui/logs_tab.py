@@ -1,10 +1,10 @@
 import tkinter as tk
-from ui.theme import Colors, Fonts
-from ui.glass_widgets import GlassPanel, GlassButton, GlassEntry, GlassLabel
+from ui.theme import get_palette, Fonts
+from ui.glass_widgets import GlassButton, GlassEntry, GlassLabel
 
 class LogsPage(tk.Frame):
     def __init__(self, master, **kw):
-        self._c = Colors()
+        self._c = get_palette()
         super().__init__(master, bg=self._c.BG_DEEP, **kw)
         self._filter_var = tk.StringVar()
         self._auto_scroll = True

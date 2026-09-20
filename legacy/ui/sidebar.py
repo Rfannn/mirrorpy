@@ -1,12 +1,13 @@
 import tkinter as tk
-from ui.theme import Colors, Fonts, Geo, NAV_ITEMS
+from ui.theme import get_palette, Fonts, Geo, NAV_ITEMS
 
 class GlassSidebar(tk.Frame):
-    def __init__(self, master, onNavigate=None, **kw):
-        self._c = Colors()
+    def __init__(self, master, onNavigate=None, onToggleTheme=None, **kw):
+        self._c = get_palette()
         super().__init__(master, bg=self._c.BG_SIDEBAR, width=Geo.SIDEBAR_WIDTH_COLLAPSED, **kw)
         self.pack_propagate(False)
         self._on_nav = onNavigate
+        self._on_theme = onToggleTheme
         self._buttons = {}
         self._active = None
         self._expanded = False
@@ -27,11 +28,18 @@ class GlassSidebar(tk.Frame):
             frame.bind("<Leave>", lambda e, f=frame, k=item["key"]: f.configure(bg=self._c.ACCENT_PRIMARY if self._active==k else self._c.BG_SIDEBAR))
 
         tk.Frame(self, bg=self._c.BG_SIDEBAR).pack(fill="both", expand=True)
-        self._theme_btn = tk.Label(self, text="☀️", font=Fonts.SIDEBAR_ICON,
+        self._theme_btn = tk.Label(self, text="🌙" if self._dark() else "☀️", font=Fonts.SIDEBAR_ICON,
                                    bg=self._c.BG_SIDEBAR, fg=self._c.TEXT_SECONDARY, cursor="hand2")
         self._theme_btn.pack(pady=(0,12))
+        self._theme_btn.bind("<Button-1>", self._toggle_theme)
         self.bind("<Enter>", self._expand)
         self.bind("<Leave>", self._collapse)
+
+    def _dark(self):
+        return self._c.BG_DEEP.lower() < "#808080"
+
+    def _toggle_theme(self, e=None):
+        if self._on_theme: self._on_theme()
 
     def _navigate(self, key):
         if self._active == key: return

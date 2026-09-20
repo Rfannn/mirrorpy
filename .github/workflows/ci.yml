@@ -46,19 +46,19 @@ jobs:
       - name: Lint with flake8
         run: |
           # stop on syntax errors or undefined names
-          flake8 mirror.py mirror_glass.py --count --select=E9,F63,F7,F82 --show-source --statistics
-          flake8 ui/ --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 legacy/mirror.py legacy/mirror_glass.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 legacy/ui/ --count --select=E9,F63,F7,F82 --show-source --statistics
           # exit-zero treats all errors as warnings
-          flake8 mirror.py mirror_glass.py ui/ --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
+          flake8 legacy/mirror.py legacy/mirror_glass.py legacy/ui/ --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
 
       - name: Security scan with bandit
         if: matrix.os == 'ubuntu-latest'
         run: |
-          bandit -r mirror.py mirror_glass.py ui/ -ll --format screen
+          bandit -r legacy/mirror.py legacy/mirror_glass.py legacy/ui/ -ll --format screen
 
       - name: Run tests
         run: |
-          python -m unittest test_mirror -v
+          cd legacy && python -m unittest test_mirror -v
 
   build:
     needs: test
@@ -90,22 +90,22 @@ jobs:
 
       - name: Build classic UI executable
         run: |
-          pyinstaller --onefile --windowed --name MirrorPy mirror.py
+          cd legacy && pyinstaller --onefile --windowed --name MirrorPy mirror.py --add-data "../ui;ui" --add-binary "../adb.exe;." --add-binary "../scrcpy.exe;."
 
       - name: Build glassmorphism UI executable
         run: |
-          pyinstaller --onefile --windowed --name MirrorPyGlass mirror_glass.py --add-data "ui;ui"
+          cd legacy && pyinstaller --onefile --windowed --name MirrorPyGlass mirror_glass.py --add-data "../ui;ui"
 
       - name: Upload classic artifact
         uses: actions/upload-artifact@v4
         with:
           name: MirrorPy-windows
-          path: dist/MirrorPy.exe
+          path: legacy/dist/MirrorPy.exe
           retention-days: 30
 
       - name: Upload glassmorphism artifact
         uses: actions/upload-artifact@v4
         with:
           name: MirrorPyGlass-windows
-          path: dist/MirrorPyGlass.exe
+          path: legacy/dist/MirrorPyGlass.exe
           retention-days: 30

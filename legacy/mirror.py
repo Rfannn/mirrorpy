@@ -3,7 +3,6 @@ MirrorPy — Wireless scrcpy Launcher
 Features: adb mDNS device discovery, QR code pairing, modern ttkbootstrap GUI.
 """
 
-import io
 import os
 import re
 import sys
@@ -20,24 +19,60 @@ from queue import Queue, Empty
 # UI
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
-from ttkbootstrap.dialogs import Messagebox
 
 # QR code
 import qrcode
 from PIL import ImageTk, Image
 
 # ---------- Config & Logging ----------
-CONFIG_FILE = "settings.ini"
-LOG_FILE = "scrcpy_launcher.log"
+def app_dir():
+    """Directory holding the app's own data files.
+
+    Running from a clone this is the source folder. Under PyInstaller it is the
+    folder containing the exe, not the temp extraction dir, so settings survive
+    a rebuild.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+APP_DIR = app_dir()
+CONFIG_FILE = os.path.join(APP_DIR, "settings.ini")
+LOG_FILE = os.path.join(APP_DIR, "scrcpy_launcher.log")
+
+
+def bundled_tool(name):
+    """Return a bundled adb/scrcpy path, or the plain name to resolve via PATH.
+
+    A frozen exe carries its copy in the app folder. Running from a source tree,
+    the binaries may sit one level up when this code lives in a subfolder, so
+    check the parent too.
+    """
+    exe = name + (".exe" if os.name == "nt" else "")
+    parent = os.path.dirname(APP_DIR)
+    for folder in (APP_DIR, parent):
+        path = os.path.join(folder, exe)
+        if os.path.exists(path):
+            return path
+    return name
+
+
+SCREENSHOT_DIR = os.path.join(APP_DIR, "screenshots")
+
+# configparser lowercases option names, so keep every key lowercase.
 DEFAULTS = {
-    "IP": "",
-    "PairPort": "5555",
-    "ConnectPort": "5555",
-    "PairCode": "",
-    "Theme": "darkly",
-    "ScanThreads": "100",
-    "PingTimeoutSec": "1",
-    "LastDevice": "",
+    "ip": "",
+    "pairport": "5555",
+    "connectport": "5555",
+    "paircode": "",
+    "theme": "dark",
+    "scanthreads": "100",
+    "pingtimeoutsec": "1",
+    "lastdevice": "",
+    "quality": "Medium",
+    "accent": "pink",
+    "autoconnect": "0",
 }
 
 logger = logging.getLogger("scrcpy_launcher")
@@ -94,7 +129,7 @@ def run_cmd(args, input_text=None, timeout=None):
 
 def adb_devices_list():
     """Return parsed ``adb devices -l`` output as a list of dicts."""
-    out, err, rc = run_cmd(["adb", "devices", "-l"])
+    out, err, rc = run_cmd([bundled_tool("adb"), "devices", "-l"])
     if rc != 0:
         return []
     devices = []
@@ -127,11 +162,11 @@ def parse_device_product(info_str):
 
 def adb_mdns_init():
     """Start the adb mDNS daemon if it isn't already running. Returns True on success."""
-    out, err, rc = run_cmd(["adb", "mdns", "check"], timeout=5)
+    out, err, rc = run_cmd([bundled_tool("adb"), "mdns", "check"], timeout=5)
     if rc == 0 and "mdns daemon version" in (out + err).lower():
         return True
     # try to start it
-    out, err, rc = run_cmd(["adb", "mdns", "check"], timeout=5)
+    out, err, rc = run_cmd([bundled_tool("adb"), "mdns", "check"], timeout=5)
     return rc == 0
 
 
@@ -143,7 +178,7 @@ def adb_mdns_discover():
     # Ensure mDNS daemon is running
     adb_mdns_init()
 
-    out, err, rc = run_cmd(["adb", "mdns", "services"], timeout=8)
+    out, err, rc = run_cmd([bundled_tool("adb"), "mdns", "services"], timeout=8)
     if rc != 0:
         return []
 
@@ -251,6 +286,51 @@ def generate_qr_pil(text, box_size=6, border=2):
     return qr.make_image(fill_color="black", back_color="white").convert("RGB")
 
 
+# ttkbootstrap theme names this interface may use. Listing them keeps the
+# check off ttk.Style(), which binds a second root and breaks window creation.
+TTK_THEME_NAMES = frozenset([
+    "bootstrap-dark", "bootstrap-light", "catppuccin-dark", "catppuccin-light",
+    "dracula-dark", "dracula-light", "everforest-dark", "everforest-light",
+    "gruvbox-dark", "gruvbox-light", "minty-dark", "minty-light",
+    "nord-dark", "nord-light", "one-dark", "one-light",
+    "pulse-dark", "pulse-light", "pydata-dark", "pydata-light",
+    "sandstone-dark", "sandstone-light", "solarized-dark", "solarized-light",
+    "tokyo-night-dark", "tokyo-night-light", "united-dark", "united-light",
+    "vapor-dark", "vapor-light",
+])
+
+
+def ttk_theme_name(value):
+    """Pick a valid ttkbootstrap theme.
+
+    Both interfaces share one settings file. The glass UI stores "dark" or
+    "light" for its own theme, which ttkbootstrap does not know, so map those
+    and fall back to a default rather than crashing.
+    """
+    aliases = {"dark": "bootstrap-dark", "light": "bootstrap-light"}
+    name = aliases.get(str(value).strip().lower(), str(value).strip())
+    return name if name in TTK_THEME_NAMES else "bootstrap-dark"
+
+
+def scrcpy_args(preset="Medium", serial=None):
+    """Build the scrcpy command line for a quality preset."""
+    from ui.theme import QUALITY_PRESETS
+
+    args = [bundled_tool("scrcpy")]
+    if serial:
+        args += ["-s", serial]
+    p = QUALITY_PRESETS.get(preset)
+    if not p:
+        return args
+    if p.get("resolution", "").lower() != "original":
+        args += ["--max-size", p["resolution"]]
+    if p.get("fps", "").lower() != "original":
+        args += ["--max-fps", p["fps"]]
+    if p.get("bitrate"):
+        args += ["--video-bit-rate", p["bitrate"]]
+    return args
+
+
 # ============================================================
 #  GUI Logger widget
 # ============================================================
@@ -352,20 +432,20 @@ class ScrcpyLauncher(ttk.Window):
     def __init__(self):
         self._cfg = configparser.ConfigParser()
         self._load_config()
-        theme = self._cfg["DEFAULT"].get("Theme", "darkly")
+        theme = ttk_theme_name(self._cfg["DEFAULT"].get("theme", "bootstrap-dark"))
         super().__init__(themename=theme)
         self.title("MirrorPy — scrcpy Launcher")
         self.geometry("900x720")
         self.minsize(800, 640)
 
         # Variables
-        self.ip_var = ttk.StringVar(value=self._cfg["DEFAULT"].get("IP", ""))
-        self.pair_port_var = ttk.StringVar(value=self._cfg["DEFAULT"].get("PairPort", "5555"))
-        self.connect_port_var = ttk.StringVar(value=self._cfg["DEFAULT"].get("ConnectPort", "5555"))
-        self.pair_code_var = ttk.StringVar(value=self._cfg["DEFAULT"].get("PairCode", ""))
+        self.ip_var = ttk.StringVar(value=self._cfg["DEFAULT"].get("ip", ""))
+        self.pair_port_var = ttk.StringVar(value=self._cfg["DEFAULT"].get("pairport", "5555"))
+        self.connect_port_var = ttk.StringVar(value=self._cfg["DEFAULT"].get("connectport", "5555"))
+        self.pair_code_var = ttk.StringVar(value=self._cfg["DEFAULT"].get("paircode", ""))
         self.theme_var = ttk.StringVar(value=theme)
-        self.scan_threads = int(self._cfg["DEFAULT"].get("ScanThreads", "100"))
-        self.ping_timeout = float(self._cfg["DEFAULT"].get("PingTimeoutSec", "1"))
+        self.scan_threads = int(self._cfg["DEFAULT"].get("scanthreads", "100"))
+        self.ping_timeout = float(self._cfg["DEFAULT"].get("pingtimeoutsec", "1"))
 
         self._qr_photo = None  # keep reference to avoid GC
 
@@ -387,13 +467,13 @@ class ScrcpyLauncher(ttk.Window):
                 self._cfg["DEFAULT"][k] = v
 
     def _save_config(self):
-        self._cfg["DEFAULT"]["IP"] = self.ip_var.get().strip()
-        self._cfg["DEFAULT"]["PairPort"] = self.pair_port_var.get().strip()
-        self._cfg["DEFAULT"]["ConnectPort"] = self.connect_port_var.get().strip()
-        self._cfg["DEFAULT"]["PairCode"] = self.pair_code_var.get().strip()
-        self._cfg["DEFAULT"]["Theme"] = self.theme_var.get().strip()
-        self._cfg["DEFAULT"]["ScanThreads"] = str(self.scan_threads)
-        self._cfg["DEFAULT"]["PingTimeoutSec"] = str(self.ping_timeout)
+        self._cfg["DEFAULT"]["ip"] = self.ip_var.get().strip()
+        self._cfg["DEFAULT"]["pairport"] = self.pair_port_var.get().strip()
+        self._cfg["DEFAULT"]["connectport"] = self.connect_port_var.get().strip()
+        self._cfg["DEFAULT"]["paircode"] = self.pair_code_var.get().strip()
+        self._cfg["DEFAULT"]["theme"] = self.theme_var.get().strip()
+        self._cfg["DEFAULT"]["scanthreads"] = str(self.scan_threads)
+        self._cfg["DEFAULT"]["pingtimeoutsec"] = str(self.ping_timeout)
         with open(CONFIG_FILE, "w") as f:
             self._cfg.write(f)
 
@@ -612,7 +692,7 @@ class ScrcpyLauncher(ttk.Window):
     # ==========================================================
 
     def _on_theme_change(self):
-        theme = self.theme_var.get()
+        theme = ttk_theme_name(self.theme_var.get())
         try:
             self.style.theme_use(theme)
             self._save_config()
@@ -761,7 +841,7 @@ class ScrcpyLauncher(ttk.Window):
             self.logger.log("Fill IP, pair port, and pairing code first.", "error")
             return
         self.logger.log(f"Pairing to {ip}:{port}…", "info")
-        out, err, rc = run_cmd(["adb", "pair", f"{ip}:{port}"],
+        out, err, rc = run_cmd([bundled_tool("adb"), "pair", f"{ip}:{port}"],
                                input_text=code + "\n", timeout=10)
         if rc == 0 and "paired" in out.lower():
             self.logger.log("✓ Paired successfully!", "success")
@@ -785,7 +865,7 @@ class ScrcpyLauncher(ttk.Window):
             self.logger.log("Set IP and port first.", "error")
             return
         self.logger.log(f"Connecting to {ip}:{port}…", "info")
-        out, err, rc = run_cmd(["adb", "connect", f"{ip}:{port}"], timeout=8)
+        out, err, rc = run_cmd([bundled_tool("adb"), "connect", f"{ip}:{port}"], timeout=8)
         if rc == 0 and ("connected" in out.lower() or "already" in out.lower()):
             self.logger.log("✓ Connected!", "success")
             self._save_config()
@@ -805,7 +885,7 @@ class ScrcpyLauncher(ttk.Window):
             self.logger.log("No IP to disconnect.", "error")
             return
         self.logger.log(f"Disconnecting {ip}…", "info")
-        out, err, rc = run_cmd(["adb", "disconnect", ip], timeout=5)
+        out, err, rc = run_cmd([bundled_tool("adb"), "disconnect", ip], timeout=5)
         if rc == 0:
             self.logger.log("✓ Disconnected.", "success")
             self._schedule(self._refresh_devices)
@@ -826,7 +906,7 @@ class ScrcpyLauncher(ttk.Window):
             return
         self.logger.log(f"Starting scrcpy for {ip}:{port}…", "info")
         try:
-            subprocess.Popen(["scrcpy", "-s", f"{ip}:{port}"])
+            subprocess.Popen([bundled_tool("scrcpy"), "-s", f"{ip}:{port}"])
             self.logger.log("✓ scrcpy launched!", "success")
             self._schedule(lambda: self.device_card.set_device(
                 self.device_card._model_var.get(), ip, port,
@@ -885,7 +965,7 @@ class ScrcpyLauncher(ttk.Window):
 
         # Step 2: Connect
         self.logger.log(f"Quick Mirror: connecting to {ip}:{port}…", "info")
-        out, err, rc = run_cmd(["adb", "connect", f"{ip}:{port}"], timeout=8)
+        out, err, rc = run_cmd([bundled_tool("adb"), "connect", f"{ip}:{port}"], timeout=8)
         connected = rc == 0 and ("connected" in out.lower() or "already" in out.lower())
         if not connected:
             self.logger.log(f"Quick Mirror: connect failed — {out} {err}", "error")
@@ -899,7 +979,7 @@ class ScrcpyLauncher(ttk.Window):
         # Step 3: Start scrcpy
         self.logger.log(f"Quick Mirror: launching scrcpy…", "info")
         try:
-            subprocess.Popen(["scrcpy", "-s", f"{ip}:{port}"])
+            subprocess.Popen([bundled_tool("scrcpy"), "-s", f"{ip}:{port}"])
             self.logger.log("Quick Mirror: ✓ scrcpy launched!", "success")
             self._schedule(lambda: self.device_card.set_device(
                 model, ip, port, best["serial"], "mirroring"))

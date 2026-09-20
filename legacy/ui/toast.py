@@ -1,9 +1,9 @@
 import tkinter as tk
-from ui.theme import Colors, Fonts, Anim
+from ui.theme import get_palette, Fonts, Anim
 
 class ToastManager:
     def __init__(self, master):
-        self._c = Colors()
+        self._c = get_palette()
         self._master = master
         self._toasts = []
 

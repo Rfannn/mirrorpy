@@ -12,36 +12,44 @@
   <a href="https://github.com/Rfannn/mirrorpy/actions"><img src="https://github.com/Rfannn/mirrorpy/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/Rfannn/mirrorpy/releases"><img src="https://img.shields.io/github/v/release/Rfannn/mirrorpy?include_prereleases" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/python-3.8+-yellow" alt="Python">
+  <img src="https://img.shields.io/badge/python-3.9+-yellow" alt="Python">
 </p>
 
 ---
 
-MirrorPy is a lightweight desktop GUI for [scrcpy](https://github.com/Genymobile/scrcpy) that makes mirroring your Android phone to your PC effortless. It features **automatic device discovery** via ADB mDNS, **QR code pairing**, and a **one-click Quick Mirror** button — no command line needed.
+> **This repo now holds the Python implementation, kept for reference.**
+> Development moved to the Rust rewrite at [Rfannn/mirror-rust](https://github.com/Rfannn/mirror-rust),
+> which is faster to start, ships a single installer, and no longer needs Python.
+> Everything below is the Python version, which still runs.
 
-## ✨ Features
+---
+
+MirrorPy is a desktop GUI for [scrcpy](https://github.com/Genymobile/scrcpy) that mirrors and controls an Android phone from a PC. It finds devices over ADB mDNS, pairs with a QR code or a pairing code, and mirrors in one click. adb and scrcpy ship with the repo, so a clone runs without installing the Android SDK.
+
+## Features
 
 | Feature | Description |
 |---------|-------------|
-| 🔍 **Smart Auto-Detect** | Discovers Android devices via ADB mDNS — no manual IP entry needed |
-| ⚡ **Quick Mirror** | One button: detect → connect → mirror in seconds |
-| 📷 **QR Code** | Live QR code encodes `adb connect` string for easy sharing |
-| 🎨 **Modern UI** | Clean ttkbootstrap interface with dark/light themes |
-| 📱 **Device Card** | Shows phone model, IP, and connection status at a glance |
-| 🌐 **Network Scan** | Ping sweep to find devices on your subnet |
-| 🔗 **USB & Wi-Fi** | Supports both USB debugging and wireless ADB over Wi-Fi |
-| 🛡️ **Thread-Safe** | All background operations are marshalled to the UI thread |
-| 📋 **ADB Devices** | Dropdown list with one-click device selection |
-| 💾 **Persistent Config** | Settings saved automatically between sessions |
+| Smart auto-detect | Finds Android devices through ADB mDNS, no manual IP entry |
+| Quick Mirror | One button: detect, connect, mirror |
+| QR code | Live QR encoding the `adb connect` string, ready to scan |
+| Quality presets | Low, Medium, High and Ultra map to real scrcpy flags |
+| Glass UI | Custom Canvas-drawn widgets with a dark and light theme |
+| Device card | Phone model, address and connection status at a glance |
+| Network scan | Ping sweep across the local subnet |
+| USB and Wi-Fi | Works over a USB cable or wireless ADB |
+| Quick actions | Screenshot, clipboard, file push, device info, ADB restart |
+| Persistent config | Settings save to `settings.ini` next to the app |
 
-## 🚀 Quick Start
+## Quick start
 
 ### Prerequisites
 
-- **Windows 10/11** (tested), Linux/macOS (experimental)
-- **Python 3.8+** ([download](https://www.python.org/downloads/))
-- **Android device** with Developer Options enabled
-- **ADB & scrcpy** binaries (included in this repo)
+- Windows 10/11, or Linux (experimental)
+- Python 3.9 or newer
+- An Android device with Developer Options enabled
+
+adb and scrcpy are bundled in this repo, so there is nothing else to install.
 
 ### Install
 
@@ -53,177 +61,158 @@ pip install -r requirements.txt
 
 ### Run
 
+Double-click `MirrorPyGlass.exe` if you have it. Otherwise, from a clone:
+
 ```bash
-python mirror.py
+python mirror_glass.py     # glass UI (the current interface)
+python mirror.py           # classic ttkbootstrap interface
 ```
 
-Or double-click `mirror.bat` if using the embedded Python distribution.
+On Windows, `mirror_glass.bat` runs the glass UI and `mirror.bat` runs the
+classic one. Both fall back to the Python on your PATH.
 
-## 📖 Usage
+On Windows you can also double-click `mirror_glass.bat`.
 
-### One-Click Mirror (Recommended)
+## Usage
 
-1. Enable **Developer Options** on your Android phone
-2. Enable **USB Debugging** or **Wireless Debugging**
-3. Click **⚡ Quick Mirror** — that's it!
+### One-click mirror
 
-MirrorPy will automatically:
-- Discover your device via ADB mDNS
-- Connect to it
-- Launch scrcpy for screen mirroring
+1. Enable Developer Options on the phone
+2. Enable USB debugging or Wireless debugging
+3. Click Quick Mirror
 
-### Manual Connection
+MirrorPy discovers the device, connects to it, and starts scrcpy.
 
-1. Click **🔍 Detect Device** to find your phone
-2. Or enter the IP:port manually
-3. Click **🔌 Connect**, then **▶ Mirror**
+### Manual connection
 
-### Pairing (Wireless Debugging)
+1. Click Detect to find the phone, or type the IP and port
+2. Click Connect, then Mirror
 
-If your phone requires pairing (Android 11+):
-1. Go to **Settings → Developer Options → Wireless Debugging → Pair device**
-2. Enter the **Pair Port** and **Pairing Code** in MirrorPy
-3. Click **🤝 Pair**
+### Pairing
 
-## 🏗️ Architecture
+Android 11 and newer usually need pairing before the first wireless connection:
+
+1. On the phone, open Settings, Developer Options, Wireless debugging, Pair device
+2. Enter the Pair port and Pairing code in MirrorPy
+3. Click Pair
+
+### Quality presets
+
+The Settings page picks the streaming profile. Each preset maps to scrcpy flags:
+
+| Preset | Resolution | Frame rate | Bitrate |
+|--------|-----------|------------|---------|
+| Low | 720 | 15 fps | 2 Mbps |
+| Medium | 720 | 30 fps | 4 Mbps |
+| High | 1080 | 60 fps | 8 Mbps |
+| Ultra | device native | device native | 50 Mbps |
+
+### Keyboard shortcuts
+
+The window is frameless, so it handles these itself:
+
+| Key | Action |
+|-----|--------|
+| Esc | Close |
+| F11 | Toggle fullscreen |
+| Ctrl+1 to Ctrl+6 | Jump to a page |
+
+### Files and settings
+
+`settings.ini`, `scrcpy_launcher.log`, and screenshots land next to the application, not in the directory you launched it from. Screenshots go to `screenshots/`.
+
+## Architecture
 
 ```
 mirrorpy/
-├── mirror.py              # Main application (GUI + logic)
-├── test_mirror.py         # Unit tests (38 tests)
-├── requirements.txt       # Python dependencies
-├── settings.ini           # User configuration (gitignored)
-├── .gitignore
-├── adb.exe                # ADB binary (included)
-├── scrcpy.exe             # scrcpy binary (included)
-├── python/                # Embedded Python (optional)
-└── .github/
-    └── workflows/
-        ├── ci.yml         # CI: lint + test
-        └── release.yml    # Release automation
+├── legacy/                    # The Python implementation
+│   ├── mirror_glass.py        # Glass UI entry point
+│   ├── mirror.py              # Classic ttkbootstrap UI, plus the shared adb/scrcpy core
+│   ├── ui/                    # Glass UI package
+│   │   ├── theme.py           # Palette, fonts, geometry, quality presets
+│   │   ├── glass_widgets.py   # Canvas-drawn button, toggle, slider, panel, badge
+│   │   ├── title_bar.py       # Frameless title bar with drag support
+│   │   ├── sidebar.py         # Expand-on-hover navigation
+│   │   ├── dashboard.py       # Device card, connection controls, QR, log
+│   │   ├── devices.py, quick_actions.py, settings_tab.py,
+│   │   │   logs_tab.py, about_tab.py
+│   │   └── toast.py, content_area.py
+│   ├── test_mirror.py         # Unit tests, 38 cases
+│   └── settings.ini           # Written at runtime
+├── adb.exe, scrcpy.exe        # Bundled Android tooling, shared by both versions
+├── scrcpy-server, *.dll       # scrcpy runtime
+└── .github/workflows/         # ci.yml and release.yml
 ```
 
-### Key Components
+The binaries stay at the repository root because the Rust rewrite reuses the
+same scrcpy distribution. Both versions resolve them from there.
+
+### Key components
 
 | Component | Purpose |
 |-----------|---------|
-| `full_discover()` | Combined ADB devices + mDNS discovery |
-| `adb_mdns_discover()` | Discover devices via `adb mdns services` |
-| `generate_qr_pil()` | Generate QR codes for connection strings |
-| `ScrcpyLauncher` | Main GUI application class |
-| `DeviceCard` | Widget showing detected device info |
-| `GuiLogger` | Thread-safe scrolling log widget |
+| `full_discover()` | Combined ADB devices and mDNS discovery |
+| `adb_mdns_discover()` | Device discovery through `adb mdns services` |
+| `generate_qr_pil()` | QR generation for connection strings |
+| `scrcpy_args()` | Quality preset to scrcpy command line |
+| `bundled_tool()` | Prefers the bundled adb/scrcpy over PATH |
+| `app_dir()` | Resolves where config, logs and binaries live |
+| `MirrorPyGlass` | Glass UI application class |
+| `get_palette()` / `set_theme()` | Shared palette, used by every page |
 
-## 🧪 Testing
+## Testing
 
 ```bash
-# Run all tests
 python -m unittest test_mirror -v
-
-# Run specific test class
-python -m unittest test_mirror.TestFullDiscover -v
 ```
 
-Tests cover:
-- Helper functions (get_local_ip, ping_host, run_cmd)
-- ADB device parsing and mDNS discovery
-- QR code generation
-- Auto-detect returns phone IP (not laptop IP)
-- Config save/load
-- Thread safety
+Coverage: helper functions, ADB output parsing, mDNS discovery, QR generation, auto-detect preferring the phone IP over the laptop IP, config load and save, and thread safety.
 
-## 🔄 CI/CD
+## CI/CD
 
-MirrorPy uses GitHub Actions for continuous integration and automated releases:
+### CI
 
-### CI Pipeline
-- **Linting**: flake8 for code quality
-- **Security**: bandit for vulnerability scanning
-- **Testing**: Unit tests on Windows and Linux
-- **Python versions**: 3.9, 3.10, 3.11, 3.12
+- flake8 linting, including a syntax gate that runs on the whole version matrix
+- bandit security scan
+- Unit tests on Windows and Linux
+- Python 3.9, 3.10, 3.11, 3.12
 
 ### Releases
-- **Trigger**: Push a tag (e.g., `v2.1.0`)
-- **Builds**: Windows `.exe` and Linux `.AppImage`
-- **Release notes**: Auto-generated from commits
-- **Artifacts**: Uploaded to GitHub Releases
 
-### Creating a Release
+- Triggered by pushing a tag, for example `v2.1.0`
+- Builds a Windows `.exe` per interface, with adb, scrcpy and the required DLLs bundled
+- Attaches the executables to a GitHub Release
 
 ```bash
-# Tag the release
 git tag v2.1.0
-
-# Push the tag to trigger the release workflow
 git push origin v2.1.0
 ```
 
-The release workflow will:
-1. Build executables for Windows and Linux
-2. Create a GitHub Release with auto-generated notes
-3. Upload the executables as release assets
-
-## 🤝 Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-### Development Setup
-
-```bash
-git clone https://github.com/Rfannn/mirrorpy.git
-cd mirrorpy
-pip install -r requirements.txt
-python -m unittest test_mirror -v
-```
-
-### Code Style
-
-- Python 3.8+
-- Follow existing conventions
-- Add tests for new features
-- Keep commits atomic and well-described
-
-## 📋 Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for a detailed history of changes.
-
-### v2.0.0 (Latest)
-- ⚡ **Quick Mirror** — one-click detect → connect → mirror
-- 🔍 **Smart Auto-Detect** — uses ADB mDNS to find real Android devices
-- 📷 **QR Code** — live QR code for connection strings
-- 🎨 **Redesigned UI** — device card, connection wizard, status indicators
-- 🛡️ **Thread Safety** — all tkinter updates marshalled to main thread
-- 🧪 **38 unit tests** — comprehensive test coverage
-
-### v1.0.0
-- Initial release
-- Basic scrcpy launcher with USB/Wi-Fi support
-- ttkbootstrap GUI
-- Network subnet scan
-
-## 🛠️ Troubleshooting
+## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| `Python not found` | Install Python 3.8+ and add to PATH |
-| `No module named ttkbootstrap` | Run `pip install ttkbootstrap` |
-| `scrcpy not found` | Ensure `scrcpy.exe` is in the project folder or on PATH |
-| `ADB device not found` | Enable USB/Wireless Debugging; same Wi-Fi network |
-| Auto-detect finds nothing | Check ADB server: run `adb start-server` manually |
-| QR code not updating | Re-detect the device to refresh IP/port |
+| `No module named ttkbootstrap` | `pip install -r requirements.txt` |
+| `No module named qrcode` | `pip install -r requirements.txt` |
+| Device not found | Enable USB or wireless debugging and stay on the same network |
+| Auto-detect finds nothing | Run the bundled `adb.exe start-server` once |
+| Pairing fails | Reopen the pairing dialog on the phone, the port changes each time |
+| Clipboard read fails | Android 10 and newer restrict clipboard reads to the focused app |
+| QR code not updating | Re-detect the device to refresh the address |
 
-## 📄 License
+## License
 
-This project is licensed under the Apache License 2.0 — see [LICENSE](LICENSE) for details.
+Apache 2.0. See [LICENSE](LICENSE).
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
-- [scrcpy](https://github.com/Genymobile/scrcpy) by Genymobile — the mirroring engine
-- [ttkbootstrap](https://github.com/israel-dryer/ttkbootstrap) — modern tkinter themes
-- [qrcode](https://github.com/lincolnloop/python-qrcode) — QR code generation
+- [scrcpy](https://github.com/Genymobile/scrcpy) by Genymobile
+- [ttkbootstrap](https://github.com/israel-dryer/ttkbootstrap) for the classic UI
+- [qrcode](https://github.com/lincolnloop/python-qrcode)
 
 ---
 
 <p align="center">
-  Made with ❤️ by <a href="https://github.com/Rfannn">Rfannn</a>
+  Made by <a href="https://github.com/Rfannn">Rfannn</a>
 </p>
+

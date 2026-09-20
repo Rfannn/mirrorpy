@@ -78,6 +78,35 @@ ACCENT_PRESETS = {
     "orange": "#ff6b35",
 }
 
+
+# ============================================================
+#  Active palette
+# ============================================================
+# Pages read the palette through get_palette() instead of building their own
+# Colors() instance, so switching theme or accent recolors the whole app.
+
+_PALETTE = Colors()
+
+
+def get_palette():
+    """Return the palette the UI is currently drawn with."""
+    return _PALETTE
+
+
+def set_theme(name):
+    """Switch between 'dark' and 'light'. Returns the new palette."""
+    global _PALETTE
+    _PALETTE = LightColors() if name == "light" else Colors()
+    return _PALETTE
+
+
+def set_accent(name):
+    """Apply an accent preset color to the active palette."""
+    color = ACCENT_PRESETS.get(name)
+    if color:
+        _PALETTE.ACCENT_PRIMARY = color
+    return _PALETTE
+
 # ============================================================
 #  Fonts
 # ============================================================
